@@ -14,16 +14,26 @@
 go get github.com/oekit/workflow@v0.2.4
 ```
 
-## 快速使用
+## 能做什么
 
+- **四种流**：Pipe 串行 / Parallel 并行（maxProcs）/ Async 异步（Future/结果通道）/ Switch 条件
+- **任意嵌套**：流即 Runnable，组合无限制
+- **Hook AOP**：Before/After 自动递归传播到子流，Before 返回 error 早退
+- **可靠性**：错误传播、panic recover、context 取消全链路
+
+## 使用示例
+
+### 串行 + 条件 + 并行组合
 ```go
 import "github.com/oekit/workflow/workflow"
 
 p := workflow.NewPipe()
-p.Add(step1, step2)      // 串行；ParallelFlow 并行 / SwitchFlow 条件 / AsyncFlow 异步
-err := p.Run(ctx)
-```
-
+p.Add(validate, enrich)
+sw := workflow.NewSwitch(routeBy) // 按条件分流
+para := workflow.NewParallel(8)
+para.Add(renderA, renderB)
+sw.AddCase("a", para)
+_ = p.Add(sw).Run(ctx)
 ## 包清单
 
 - \`workflow/\` — PipeFlow/ParallelFlow/AsyncFlow/SwitchFlow（Hook + 嵌套 + 错误传播 + panic recover）
