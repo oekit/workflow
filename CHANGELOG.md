@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.0] — 2026-10-17
+
+### Breaking
+- **包提升至模块根**：`github.com/oekit/workflow/workflow` → `github.com/oekit/workflow`
+  （仅移动目录与导入路径，代码零逻辑变化；矩阵内无消费方）
+
 
 ## [v0.2.7] — 2026-10-17
 
