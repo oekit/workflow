@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/workflow
 
-> 组合式流程编排——PipeFlow/ParallelFlow/AsyncFlow/SwitchFlow + Hook AOP
-> 当前版本：`v0.2.5` · module：`github.com/oekit/workflow` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 组合式流程编排——串行/并行/异步/条件分支 + Hook AOP
+> 当前版本：`v0.2.6` · module：`github.com/oekit/workflow` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `workflow/`
