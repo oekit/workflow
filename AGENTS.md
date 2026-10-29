@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/workflow
 
 > 组合式流程编排——串行/并行/异步/条件分支 + Hook AOP
-> 当前版本：`v0.3.2` · module：`github.com/oekit/workflow` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.3.3` · module：`github.com/oekit/workflow` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `./`
