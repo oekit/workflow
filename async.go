@@ -130,6 +130,14 @@ func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 
 	async.GoSafe(func() {
 		<-done
+		// 取消兜底（#35，对齐 Run 的同款兜底）：外部 cancel/超时后全部任务走
+		// skip/豁免路径 ⇒ firstErr 保持 nil ⇒ Wait 返回 nil = 假成功——调用方
+		// 按「全部成功」继续走，与 Run 已修的「假成功」语义相悖。
+		// Future.Cancel() 的显式取消不在此列：那是调用方主动放弃等待，
+		// 语义就是「取消即成功返回」（TestAsyncFlow_Cancel 钉住）。
+		if firstErr == nil && ctx.Err() != nil && !future.canceled.Load() {
+			firstErr = ctx.Err()
+		}
 		// 与 Run 对齐：done 必须在结果可读之后置位（先 Store 后 send 存在
 		// IsDone()==true 但 Wait() 仍阻塞的观察窗口）
 		future.ch <- firstErr

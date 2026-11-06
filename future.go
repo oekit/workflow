@@ -11,6 +11,10 @@ type Future struct {
 	ch     chan error
 	done   atomic.Bool
 	cancel context.CancelFunc
+	// canceled 标记「调用方经 Future.Cancel 显式取消」（#35）：显式取消的
+	// 语义是「放弃等待即成功返回」；外部 parent ctx 取消则必须上抛——
+	// RunAsync 的取消兜底以本标记区分两者。
+	canceled atomic.Bool
 }
 
 // newFuture 创建一个新的 Future。
@@ -48,6 +52,7 @@ func (f *Future) IsDone() bool {
 // Cancel 取消异步任务。
 // 如果任务已完成，此方法无效。
 func (f *Future) Cancel() {
+	f.canceled.Store(true)
 	if f.cancel != nil {
 		f.cancel()
 	}

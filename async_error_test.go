@@ -128,3 +128,40 @@ func TestAsyncFlow_CancelledCtxReturnsError(t *testing.T) {
 		t.Error("tasks must not run after cancellation")
 	}
 }
+
+// TestRunAsync_ExternalCancel_NotFakeSuccess 钉住 #35：外部 cancel/超时后
+// 全部任务走 skip/豁免路径 ⇒ firstErr 保持 nil ⇒ Wait 返回 nil = 假成功。
+// 修复后必须返回 context.Canceled（对齐 Run 同场景）；
+// Future.Cancel() 显式取消保持「取消即成功返回」语义（TestAsyncFlow_Cancel）。
+func TestRunAsync_ExternalCancel_NotFakeSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// gate：两任务阻塞在 gate 上（保证外部取消发生时任务仍在执行中，
+	// 走 skip/豁免路径 ⇒ firstErr 保持 nil——正是 #35 的假成功形态）
+	gate := make(chan struct{})
+	task := func() Runnable { return &gateRunnable{gate: gate} }
+	f := NewAsync(2).Add(task(), task()).RunAsync(ctx)
+
+	// 任务已阻塞，外部取消
+	cancel()
+	close(gate) // 放行 goroutine 收尾
+
+	err := f.Wait(context.Background())
+	if err == nil {
+		t.Fatal("外部取消后 Wait 返回 nil = 假成功（#35）")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+// gateRunnable 阻塞在 gate 上直至其关闭或 ctx 取消（#35 用例专用）。
+type gateRunnable struct{ gate chan struct{} }
+
+func (g *gateRunnable) Run(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.gate:
+		return nil
+	}
+}
