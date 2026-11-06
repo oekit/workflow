@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.7] — 2026-11-06
+
+- build: 矩阵依赖地板对齐（第二轮发版后置）
+
 ## [v0.3.6] — 2026-11-06
 
 - **BREAKING** fix(async): `RunAsync` 补取消兜底——外部 cancel/超时后 `Future.Wait` 不再假成功（[#35](https://github.com/oekit/workflow/issues/35)）——`Run` 完成路径有取消兜底（全部任务走 skip/豁免 ⇒ firstErr 为 nil ⇒ 返回 ctx.Err()，「假成功」已修），`RunAsync` 完成路径缺同一段：外部取消后直接 `future.ch <- firstErr`（nil）⇒ Wait 返回 nil ⇒ 调用方按「全部成功」继续走。修法：与 Run 同款兜底，以 `Future.canceled` 标记区分两种取消——**Future.Cancel() 显式取消保持「放弃等待即成功返回」**（TestAsyncFlow_Cancel 钉住的既有语义不变），**parent ctx 取消/超时则上抛 context 错误**（0.x minor 允许 breaking：此前依赖「外部取消返回 nil」的消费方需改判据 `err != nil && !errors.Is(err, context.Canceled)`）
