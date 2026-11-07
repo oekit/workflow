@@ -42,16 +42,13 @@ func TestAsyncFlow_RunAsync_TaskTimeoutSurfaced(t *testing.T) {
 	a.Add(&errTask{err: taskErr})
 
 	future := a.RunAsync(context.Background())
-	select {
-	case err := <-future.ch:
-		if err == nil {
-			t.Fatal("expected task's own timeout error, got nil")
-		}
-		if err.Error() != taskErr.Error() {
-			t.Errorf("expected %q, got %q", taskErr.Error(), err.Error())
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for future result")
+	// Future.Wait 可重入（#43），这里直接走公开 API 等待最终结果
+	err := future.Wait(context.Background())
+	if err == nil {
+		t.Fatal("expected task's own timeout error, got nil")
+	}
+	if err.Error() != taskErr.Error() {
+		t.Errorf("expected %q, got %q", taskErr.Error(), err.Error())
 	}
 }
 

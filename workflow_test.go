@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -362,6 +363,157 @@ func TestFuture_Wait_Timeout(t *testing.T) {
 	err := future.Wait(timeoutCtx)
 	if err == nil {
 		t.Error("expected error")
+	}
+}
+
+// TestFuture_Wait_Reentrant 回归测试（#43）：Wait 曾是一次性消费（channel
+// 容量 1），首次调用取走结果后，第二次调用永久阻塞。修复后结果被缓存到
+// 字段，重复 Wait 返回同一个值。
+func TestFuture_Wait_Reentrant(t *testing.T) {
+	t.Run("success result cached", func(t *testing.T) {
+		async := NewAsync(2)
+		async.Add(&mockRunnable{name: "task1"})
+
+		future := async.RunAsync(context.Background())
+
+		first := future.Wait(context.Background())
+		if first != nil {
+			t.Fatalf("first Wait: expected nil, got %v", first)
+		}
+		// 修复前：channel 已被首次 Wait 消费，这里永久阻塞
+		second := future.Wait(context.Background())
+		if second != nil {
+			t.Errorf("second Wait: expected nil, got %v", second)
+		}
+	})
+
+	t.Run("error result cached", func(t *testing.T) {
+		expectedErr := errors.New("task failed")
+		async := NewAsync(2)
+		async.Add(&errTask{err: expectedErr})
+
+		future := async.RunAsync(context.Background())
+
+		first := future.Wait(context.Background())
+		if !errors.Is(first, expectedErr) {
+			t.Fatalf("first Wait: expected %v, got %v", expectedErr, first)
+		}
+		second := future.Wait(context.Background())
+		if !errors.Is(second, expectedErr) {
+			t.Errorf("second Wait: expected %v, got %v", expectedErr, second)
+		}
+	})
+}
+
+// TestFuture_Wait_TimeoutThenRetry 回归测试（#43）：首次 Wait 超时返回
+// ctx.Err() 后，任务随后真实完成——重试 Wait 必须拿到最终结果（成功或
+// 失败），而不是永久阻塞或再次超时。
+func TestFuture_Wait_TimeoutThenRetry(t *testing.T) {
+	t.Run("retry gets success result", func(t *testing.T) {
+		async := NewAsync(2)
+		async.Add(&mockRunnable{name: "slow task", delay: 50 * time.Millisecond})
+
+		future := async.RunAsync(context.Background())
+
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		first := future.Wait(timeoutCtx)
+		cancel()
+		if !errors.Is(first, context.DeadlineExceeded) {
+			t.Fatalf("first Wait: expected DeadlineExceeded, got %v", first)
+		}
+
+		// 修复前：结果 channel 从未被消费但也不会再有新值，这里永久阻塞
+		second := future.Wait(context.Background())
+		if second != nil {
+			t.Fatalf("retry Wait after timeout: expected nil, got %v", second)
+		}
+		if !future.IsDone() {
+			t.Error("expected done after retry Wait")
+		}
+	})
+
+	t.Run("retry gets error result", func(t *testing.T) {
+		taskErr := errors.New("slow failure")
+		async := NewAsync(2)
+		async.Add(&mockRunnable{name: "slow task", delay: 50 * time.Millisecond, err: taskErr})
+
+		future := async.RunAsync(context.Background())
+
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		first := future.Wait(timeoutCtx)
+		cancel()
+		if !errors.Is(first, context.DeadlineExceeded) {
+			t.Fatalf("first Wait: expected DeadlineExceeded, got %v", first)
+		}
+
+		second := future.Wait(context.Background())
+		if !errors.Is(second, taskErr) {
+			t.Fatalf("retry Wait after timeout: expected %v, got %v", taskErr, second)
+		}
+	})
+}
+
+// TestFuture_Wait_Concurrent 验证并发正确性（#43）：多 goroutine 同时/先后
+// Wait 同一 Future，全部拿到同一个结果（-race 下稳定）。修复前结果是容量
+// 1 的 channel，只有一个等待者能消费到，其余永久阻塞。
+func TestFuture_Wait_Concurrent(t *testing.T) {
+	// gate 控制任务完成时机：等待者全部起跑前任务不完成
+	gate := make(chan struct{})
+	async := NewAsync(2)
+	async.Add(&gateRunnable{gate: gate})
+
+	future := async.RunAsync(context.Background())
+
+	const waiters = 8
+	var entered sync.WaitGroup
+	entered.Add(waiters)
+	results := make([]error, waiters)
+	var wg sync.WaitGroup
+	wg.Add(waiters)
+	for i := 0; i < waiters; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			entered.Done()
+			results[i] = future.Wait(context.Background())
+		}()
+	}
+	entered.Wait() // 等待者已起跑（部分先于完成阻塞在 Wait，部分可能在完成后到达）
+	close(gate)    // 放行任务 → future 完成
+	wg.Wait()
+
+	for i, err := range results {
+		if err != nil {
+			t.Errorf("waiter %d: expected nil, got %v", i, err)
+		}
+	}
+
+	// 第一波全部返回 ⇒ 完成信号已广播；此后再 Wait 必须立即返回缓存值
+	for i := 0; i < 4; i++ {
+		if err := future.Wait(context.Background()); err != nil {
+			t.Errorf("late Wait %d: expected nil, got %v", i, err)
+		}
+	}
+}
+
+// TestFuture_Wait_AfterCancel_Reentrant：显式 Cancel 的语义是「放弃等待即
+// 成功返回」（#35，TestAsyncFlow_Cancel 钉住）；该结果同样被缓存，
+// Cancel 后重复 Wait 不会阻塞（#43）。
+func TestFuture_Wait_AfterCancel_Reentrant(t *testing.T) {
+	async := NewAsync(2)
+	async.Add(&mockRunnable{name: "task1", delay: 200 * time.Millisecond})
+
+	future := async.RunAsync(context.Background())
+	future.Cancel()
+
+	for i := 0; i < 2; i++ {
+		err := future.Wait(context.Background())
+		if err != nil {
+			t.Errorf("Wait %d after Cancel: expected nil, got %v", i, err)
+		}
+	}
+	if !future.IsDone() {
+		t.Error("expected done after Cancel + Wait")
 	}
 }
 
