@@ -41,6 +41,18 @@
 //     返回 fmt.Errorf("db timeout: %w", context.DeadlineExceeded)），必须
 //     正常上报给调用方，绝不吞错。
 //
+// AsyncFlow.RunAsyncWithResults 的结果通道同样套用该规则：被豁免的任务
+// 结果记为 Error: nil（每个任务恰好一条结果，Index 连续）；「通道内全部
+// Error 为 nil」不代表流程未被取消，调用方需结合自身 context 判断。
+//
+// # 并发契约
+//
+// 各 Flow 的 Add/Case、Hooks、SetHookManager 内部加锁，与 Run 并发调用
+// 不构成数据竞争。Run 以启动瞬间的成员快照执行：执行期间新增的任务/分支、
+// 替换的 HookManager 不影响本次 Run，下次 Run 生效。
+// 注意 HookManager 自身不在此列——Run 期间向 HookManager 注册 Hook 仍是
+// 数据竞争，Hook 必须在 Run 之前注册完毕（见 HookManager 并发契约）。
+//
 // # Hook AOP
 //
 //	hook := workflow.NewHookManager()

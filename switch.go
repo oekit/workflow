@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 )
 
 // SwitchFunc 条件路由函数。
@@ -12,7 +13,12 @@ type SwitchFunc func(ctx context.Context) string
 
 // SwitchFlow 条件分支流程。
 // 根据 SwitchFunc 返回的 key 选择执行路径。
+//
+// 并发契约（#46）：Case/Hooks/SetHookManager 内部加锁，与 Run 并发调用
+// 不构成数据竞争。Run 在选定 key 后以加锁读取瞬间的分支表执行，Run
+// 期间新增的分支不影响本次执行（下次 Run 生效）。
 type SwitchFlow struct {
+	mu          sync.Mutex
 	runnables   map[string]Runnable
 	switchFunc  SwitchFunc
 	hookManager *HookManager
@@ -28,9 +34,12 @@ func NewSwitch(switchFunc SwitchFunc) *SwitchFlow {
 }
 
 // Case 添加一个分支。
-// 重复 key 后者覆盖前者（静默）；分支集合应在 Run 前定型。
+// 重复 key 后者覆盖前者（静默）。
+// 与 Run 并发调用是安全的：本次 Run 不感知并发新增的分支（快照语义）。
 // 若分支本身是子流程,当前 HookManager 会同步传播给它(2026-09-06 复审修复)。
 func (s *SwitchFlow) Case(key string, runnable Runnable) *SwitchFlow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.runnables[key] = runnable
 	setHookManagerByRunnable(runnable, s.hookManager)
 	return s
@@ -38,11 +47,16 @@ func (s *SwitchFlow) Case(key string, runnable Runnable) *SwitchFlow {
 
 // Hooks 获取 Hook 管理器。
 func (s *SwitchFlow) Hooks() *HookManager {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.hookManager
 }
 
 // SetHookManager 设置 HookManager（用于嵌套传播）。
+// 与 Run 并发调用是安全的：本次 Run 继续使用加锁读取到的旧 manager。
 func (s *SwitchFlow) SetHookManager(hm *HookManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.hookManager = hm
 	// 递归传播到子流程
 	for _, r := range s.runnables {
@@ -72,13 +86,22 @@ func (s *SwitchFlow) Run(ctx context.Context) error {
 		return err
 	}
 
-	// 查找分支
-	runnable, exists := s.runnables[key]
+	// 查找分支（#46：加锁读取分支与 HookManager 的瞬时快照，
+	// 与并发 Case/SetHookManager 互不构成数据竞争）
+	runnable, hm, exists := s.branch(key)
 	if !exists {
 		return fmt.Errorf("workflow: no such branch: %s", key)
 	}
 
-	return safeRun(ctx, runnable, s.hookManager)
+	return safeRun(ctx, runnable, hm)
+}
+
+// branch 加锁读取 key 对应的分支与当前 HookManager。
+func (s *SwitchFlow) branch(key string) (runnable Runnable, hm *HookManager, exists bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	runnable, exists = s.runnables[key]
+	return runnable, s.hookManager, exists
 }
 
 // selectBranch 调 switchFunc 并捕获 panic。

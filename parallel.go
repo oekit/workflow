@@ -3,6 +3,8 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sync"
 
 	"github.com/oekit/concurrency/async"
 )
@@ -10,7 +12,12 @@ import (
 // ParallelFlow 并发执行多个任务。
 // 支持并发限制和 context 取消传播。
 // 当任一任务失败时，取消其他正在执行的任务。
+//
+// 并发契约（#46）：Add/Hooks/SetHookManager 内部加锁，与 Run 并发调用
+// 不构成数据竞争。Run 以启动瞬间的任务快照执行，Run 期间新增的任务
+// 不影响本次执行（下次 Run 生效）。
 type ParallelFlow struct {
+	mu          sync.Mutex
 	runnables   []Runnable
 	maxProcess  int
 	hookManager *HookManager
@@ -31,7 +38,10 @@ func NewParallel(maxProcs int) *ParallelFlow {
 // Add 添加一个或多个并发任务。
 // 若任务本身是子流程,当前 HookManager 会同步传播给它(与 PipeFlow.Add
 // 对称,2026-09-06 复审修复)。
+// 与 Run 并发调用是安全的：本次 Run 不感知并发新增的任务（快照语义）。
 func (p *ParallelFlow) Add(tasks ...Runnable) *ParallelFlow {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.runnables = append(p.runnables, tasks...)
 	for _, r := range tasks {
 		setHookManagerByRunnable(r, p.hookManager)
@@ -41,11 +51,16 @@ func (p *ParallelFlow) Add(tasks ...Runnable) *ParallelFlow {
 
 // Hooks 获取 Hook 管理器。
 func (p *ParallelFlow) Hooks() *HookManager {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.hookManager
 }
 
 // SetHookManager 设置 HookManager（用于嵌套传播）。
+// 与 Run 并发调用是安全的：本次 Run 继续使用快照中的旧 manager。
 func (p *ParallelFlow) SetHookManager(hm *HookManager) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.hookManager = hm
 	// 递归传播到子流程
 	for _, r := range p.runnables {
@@ -60,16 +75,17 @@ func (p *ParallelFlow) SetHookManager(hm *HookManager) {
 // 时，错误链中的 context.Canceled/DeadlineExceeded 才视为取消的副作用被
 // 豁免；流程 context 健康时，任务自身的超时/取消失败必须上报。
 func (p *ParallelFlow) Run(ctx context.Context) error {
-	if len(p.runnables) == 0 {
+	tasks, hm := p.snapshot()
+	if len(tasks) == 0 {
 		return nil
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errs := make(chan error, len(p.runnables))
+	errs := make(chan error, len(tasks))
 
-	done := goSafeExecute(ctx, cancel, p.runnables, p.maxProcess, p.hookManager, func(idx int, err error) {
+	done := goSafeExecute(ctx, cancel, tasks, p.maxProcess, hm, func(idx int, err error) {
 		if err == nil {
 			return
 		}
@@ -99,4 +115,13 @@ func (p *ParallelFlow) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// snapshot 返回任务集合与 HookManager 的快照（#46）。
+// Run 经快照执行：与并发 Add/SetHookManager 互不构成数据竞争，
+// 且本次执行不受快照之后变更的影响。
+func (p *ParallelFlow) snapshot() ([]Runnable, *HookManager) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.runnables), p.hookManager
 }
