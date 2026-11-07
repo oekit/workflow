@@ -41,6 +41,10 @@
 //     返回 fmt.Errorf("db timeout: %w", context.DeadlineExceeded)），必须
 //     正常上报给调用方，绝不吞错。
 //
+// AsyncFlow.RunAsyncWithResults 的结果通道同样套用该规则：被豁免的任务
+// 结果记为 Error: nil（每个任务恰好一条结果，Index 连续）；「通道内全部
+// Error 为 nil」不代表流程未被取消，调用方需结合自身 context 判断。
+//
 // # 并发契约
 //
 // 各 Flow 的 Add/Case、Hooks、SetHookManager 内部加锁，与 Run 并发调用

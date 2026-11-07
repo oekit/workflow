@@ -162,3 +162,124 @@ func (g *gateRunnable) Run(ctx context.Context) error {
 		return nil
 	}
 }
+
+// --- #45: RunAsyncWithResults 套用取消类错误豁免（口径与 Run/RunAsync 对齐） ---
+
+// collectResults 读尽结果通道并按 Index 建立映射（#45 测试用；
+// 重复 Index 直接判失败，钉住「每个任务恰好一条结果」）。
+func collectResults(t *testing.T, results <-chan AsyncResult) map[int]error {
+	t.Helper()
+	got := make(map[int]error)
+	for r := range results {
+		if _, dup := got[r.Index]; dup {
+			t.Fatalf("duplicate result for index %d", r.Index)
+		}
+		got[r.Index] = r.Error
+	}
+	return got
+}
+
+// TestAsyncFlow_RunAsyncWithResults_TaskTimeoutSurfaced 回归测试（#45）：
+// 流程 context 健康时，任务错误链中的 context.DeadlineExceeded 是任务自身
+// 的超时失败，必须在结果通道原样上报（对齐 Run/RunAsync 的 M6 语义，
+// 豁免判定不得把任务自身失败吞成 nil）。
+func TestAsyncFlow_RunAsyncWithResults_TaskTimeoutSurfaced(t *testing.T) {
+	taskErr := fmt.Errorf("db timeout: %w", context.DeadlineExceeded)
+	a := NewAsync(2)
+	a.Add(&errTask{err: taskErr})
+
+	got := collectResults(t, a.RunAsyncWithResults(context.Background()))
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 result, got %d", len(got))
+	}
+	err := got[0]
+	if err == nil {
+		t.Fatal("expected task's own timeout error in results, got nil (吞错回归)")
+	}
+	if err.Error() != taskErr.Error() {
+		t.Errorf("expected %q, got %q", taskErr.Error(), err.Error())
+	}
+}
+
+// TestAsyncFlow_RunAsyncWithResults_FlowCancelExempted 回归测试（#45）：
+// 流程级 context 被外部取消时，任务的取消类错误只是取消的副作用——
+// 结果通道记为 Error: nil（豁免不上报）。修复前取消类错误被原样塞进
+// 结果通道，与 Run/RunAsync 的豁免口径分叉。
+func TestAsyncFlow_RunAsyncWithResults_FlowCancelExempted(t *testing.T) {
+	gate := make(chan struct{})
+	a := NewAsync(2)
+	a.Add(&gateRunnable{gate: gate}, &gateRunnable{gate: gate})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	results := a.RunAsyncWithResults(ctx)
+
+	// 任务仍在执行（阻塞在 gate 上）时外部取消
+	cancel()
+	close(gate) // 放行收尾
+
+	got := collectResults(t, results)
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 results (one per task), got %d", len(got))
+	}
+	for idx, err := range got {
+		if err != nil {
+			t.Errorf("task %d: cancellation side-effect must be exempted (nil), got %v", idx, err)
+		}
+	}
+}
+
+// TestAsyncFlow_RunAsyncWithResults_PreCancelledCtxExempted 回归测试（#45）：
+// context 预先取消时所有任务走 skip 路径，goSafeExecute 会为每个任务合成
+// 「task N cancelled: context.Canceled」错误——同样在豁免判定覆盖内，
+// 结果应为 nil 而不是合成取消错误。
+func TestAsyncFlow_RunAsyncWithResults_PreCancelledCtxExempted(t *testing.T) {
+	ran := false
+	a := NewAsync(2)
+	a.Add(&okTask{ran: &ran})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got := collectResults(t, a.RunAsyncWithResults(ctx))
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 result, got %d", len(got))
+	}
+	if got[0] != nil {
+		t.Errorf("skipped task's synthetic cancel error must be exempted (nil), got %v", got[0])
+	}
+	if ran {
+		t.Error("tasks must not run after cancellation")
+	}
+}
+
+// TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError 与
+// TestParallelFlow_MixedRealAndCancelError 对齐（#45 一致性）：真实失败
+// 打断慢任务产生取消副作用——真实错误原样上报、取消副作用豁免为 nil，
+// 调用方不再被迫从结果通道里自行剔除取消噪音。
+func TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError(t *testing.T) {
+	realErr := errors.New("db down: real failure")
+	a := NewAsync(4)
+	a.Add(
+		&mockRunnable{name: "slow", delay: 200 * time.Millisecond}, // 会被失败任务的 cancel 打断 → 取消类错误 → 豁免
+		&errTask{err: realErr}, // 立即失败的真实错误
+	)
+
+	got := collectResults(t, a.RunAsyncWithResults(context.Background()))
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 results, got %d", len(got))
+	}
+	realCount := 0
+	for idx, err := range got {
+		switch {
+		case errors.Is(err, realErr):
+			realCount++
+		case err == nil:
+			// 被取消打断的慢任务：豁免为 nil
+		default:
+			t.Errorf("task %d: unexpected error %v (cancel side-effect must be exempted)", idx, err)
+		}
+	}
+	if realCount != 1 {
+		t.Fatalf("expected real error reported exactly once, got %d", realCount)
+	}
+}
