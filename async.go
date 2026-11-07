@@ -89,10 +89,9 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 		if firstErr == nil && childCtx.Err() != nil {
 			firstErr = childCtx.Err()
 		}
-		future.ch <- firstErr
-		// done 必须在结果可读之后置位：先 Store 后 send 存在
-		// IsDone()==true 但 Wait() 仍阻塞的观察窗口
-		future.done.Store(true)
+		// complete 内部先写 result 再 close(done) 广播：结果可读与
+		// IsDone==true 同时成立，且 Wait 可重入（#43）
+		future.complete(firstErr)
 		// 成功路径也必须 cancel：否则子 context 泄漏在 parent 的
 		// children 集合里，长期存活的 app ctx 下每次 Run 累积一个
 		cancel()
@@ -106,8 +105,7 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 	if len(a.runnables) == 0 {
 		future := newFuture(nil)
-		future.done.Store(true)
-		future.ch <- nil
+		future.complete(nil)
 		return future
 	}
 
@@ -138,10 +136,9 @@ func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 		if firstErr == nil && ctx.Err() != nil && !future.canceled.Load() {
 			firstErr = ctx.Err()
 		}
-		// 与 Run 对齐：done 必须在结果可读之后置位（先 Store 后 send 存在
-		// IsDone()==true 但 Wait() 仍阻塞的观察窗口）
-		future.ch <- firstErr
-		future.done.Store(true)
+		// 与 Run 对齐：complete 内部先写 result 再 close(done) 广播，结果
+		// 可读与 IsDone==true 同时成立，且 Wait 可重入（#43）
+		future.complete(firstErr)
 		// 同 Run：成功路径释放子 context（与 Future.Cancel 幂等兼容）
 		cancel()
 	})
