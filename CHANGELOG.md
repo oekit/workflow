@@ -2,6 +2,14 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.8] — 2026-11-07
+
+- fix(future): Wait 改可重入——结果缓存后重复/并发/超时重试调用直接返回缓存值，二次调用不再永久阻塞（#43）
+- fix(async): RunAsyncWithResults 套用取消类错误豁免——口径与 Run/RunAsync 对齐（#45）
+- fix(flow): Add/Case 与 Run 并发数据竞争——内部加锁 + Run 快照执行，并发契约文档化（#46）
+
+关联问题单：workflow#43、workflow#45、workflow#46。
+
 ## [v0.3.7] — 2026-11-06
 
 - build: 矩阵依赖地板对齐（第二轮发版后置）
