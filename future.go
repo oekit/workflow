@@ -64,7 +64,9 @@ func (f *Future) cachedResult() error {
 // Wait 可重入（#43）：结果只产生一次并被缓存到字段（mutex 保护），首次
 // 消费后，后续调用——包括并发调用、以及首次 Wait 超时/取消返回 ctx.Err()
 // 后的重试——都直接拿到同一个缓存值，不会永久阻塞。
-// 优先返回已就绪的结果（结果就绪时立即返回，即使 ctx 已取消）。
+// 优先返回已就绪的结果（结果就绪时立即返回，即使 ctx 已取消）；ctx 与
+// 结果双就绪时，非取消类的缓存错误优先于 ctx.Err()（#61）——不掷硬币，
+// 无真实错误时仍返回 ctx.Err()（#35 取消不得假成功）。
 func (f *Future) Wait(ctx context.Context) error {
 	// 非阻塞检查：结果可能已经就绪
 	select {
@@ -75,6 +77,18 @@ func (f *Future) Wait(ctx context.Context) error {
 	// 阻塞等待
 	select {
 	case <-ctx.Done():
+		// #61：ctx 与结果双就绪时，select 的二选一是随机掷硬币——此前
+		// ~29/30 返回 ctx.Err()，把任务真实错误（如 DB 约束冲突）掩蔽为
+		// 「流程被取消」，与 ParallelFlow 同场景恒返回真实错误分叉。
+		// 结果此时已缓存（complete 先写 result 再 close(done)）：非取消类
+		// 错误优先返回——对齐文档承诺的「优先返回已就绪的结果」。无真实
+		// 错误（含缓存为 nil 或取消类错误）时仍返回 ctx.Err()，不破坏 #35
+		// 「取消不得假成功」。
+		if f.IsDone() {
+			if err := f.cachedResult(); err != nil && !isCancellationErr(err) {
+				return err
+			}
+		}
 		return ctx.Err()
 	case <-f.done:
 		return f.cachedResult()

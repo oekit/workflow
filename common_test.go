@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -40,3 +41,47 @@ func TestSafeRun_AfterHookPanic(t *testing.T) {
 		t.Errorf("error should mention after hook panic, got %v", err)
 	}
 }
+
+// TestSafeRun_AfterHookPanic_JoinsTaskError 是 #62 的回归钉：任务真实错误
+// 与 After hook panic 并存时必须 join 而非整体替换——此前 hook 的 infra
+// 噪音顶掉根因错误（errors.Is(err, taskErr) 不再成立），排障主线索被
+// 永久丢弃。钉住：任务错误链保留（errors.Is 成立）+ hook panic 仍可见。
+func TestSafeRun_AfterHookPanic_JoinsTaskError(t *testing.T) {
+	hm := NewHookManager()
+	hm.Add(&panickyAfterHook{})
+
+	taskErr := errors.New("payment gateway 503")
+	err := safeRun(context.Background(), &errTask{err: taskErr}, hm)
+	if err == nil {
+		t.Fatal("expected joined error, got nil")
+	}
+	if !errors.Is(err, taskErr) {
+		t.Fatalf("task real error must survive after-hook panic (join, not replace, #62): got %v", err)
+	}
+	if !strings.Contains(err.Error(), "after hook panic") {
+		t.Errorf("after hook panic must still be reported alongside task error, got %v", err)
+	}
+}
+
+// TestSafeRun_TaskPanicThenAfterHookPanic_Joins 两个 panic 叠加态：任务
+// panic 转义的错误与 After hook panic 也必须 join（#62 同根因）。
+func TestSafeRun_TaskPanicThenAfterHookPanic_Joins(t *testing.T) {
+	hm := NewHookManager()
+	hm.Add(&panickyAfterHook{})
+
+	err := safeRun(context.Background(), &panickyTask{}, hm)
+	if err == nil {
+		t.Fatal("expected joined error, got nil")
+	}
+	if !strings.Contains(err.Error(), "workflow: panic") {
+		t.Errorf("task panic must survive after-hook panic (join, not replace, #62): got %v", err)
+	}
+	if !strings.Contains(err.Error(), "after hook panic") {
+		t.Errorf("after hook panic must still be reported, got %v", err)
+	}
+}
+
+// panickyTask 在 Run 阶段 panic 的 Runnable（#62 叠加态用例）。
+type panickyTask struct{}
+
+func (t *panickyTask) Run(context.Context) error { panic("task boom") }
