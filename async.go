@@ -133,7 +133,7 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 		// 同场景恒返回真实错误分叉。对齐 ParallelFlow 的「先 drain 完任务
 		// 结果再看 ctx」：任务与流程共享取消源（childCtx 派生自同一
 		// parent），答取消的任务会很快收尾，此处等待的只是收尾窗口
-		//（无真实错误时仍返回 ctx.Err()，#35 取消不得假成功）。
+		// （无真实错误时仍返回 ctx.Err()，#35 取消不得假成功）。
 		<-future.done
 		if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
 			return cached
