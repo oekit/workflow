@@ -51,7 +51,15 @@ func safeRun(ctx context.Context, r Runnable, hm *HookManager) (err error) {
 		// recover 吞掉且 resultFn 永不执行——Parallel/Async 静默丢任务错误。
 		defer func() {
 			if rp := recover(); rp != nil {
-				err = fmt.Errorf("workflow: after hook panic: %v\n%s", rp, debug.Stack())
+				hookErr := fmt.Errorf("workflow: after hook panic: %v\n%s", rp, debug.Stack())
+				// #62：任务真实错误与 hook panic 并存时 join 而非整体替换——
+				// 此前 hook 的 infra 噪音顶掉根因错误（errors.Is(err, taskErr)
+				// 不再成立），排障时主线索被永久丢弃。
+				if err != nil {
+					err = errors.Join(err, hookErr)
+				} else {
+					err = hookErr
+				}
 			}
 		}()
 		if hm != nil && hm.Len() > 0 {

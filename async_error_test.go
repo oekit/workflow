@@ -283,3 +283,85 @@ func TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError(t *testing.T) {
 		t.Fatalf("expected real error reported exactly once, got %d", realCount)
 	}
 }
+
+// --- #61: 父 ctx 取消与任务真实错误并存时错误面不得掷硬币 ---
+
+// failFastTask 立即返回固定错误，执行后发信号（#61 用例：确保真实错误
+// 已被 resultFn 记录、流程 cancel 已触发后，再取消父 ctx）。
+type failFastTask struct {
+	ran chan struct{}
+	err error
+}
+
+func (t *failFastTask) Run(context.Context) error {
+	t.ran <- struct{}{}
+	return t.err
+}
+
+// TestAsyncFlow_Run_ParentCancelAndRealError_SurfacesRealError 是 #61 的
+// 回归钉：任务 A 快速失败于真实业务错误（resultFn 记录 firstErr → 流程
+// cancel），任务 B 阻塞至父 ctx 取消后走豁免路径（合规），此时调用方父
+// ctx 也被取消——finalizer 随后把真实错误写入 future，此前 Wait 的双就绪
+// select 随机二选一（实测 29/30 返回 context.Canceled，把真实错误掩蔽为
+// 「流程被取消」，与 ParallelFlow 同场景 30/30 返回真实错误分叉）。
+// 修复后必须 30/30 返回真实错误。
+func TestAsyncFlow_Run_ParentCancelAndRealError_SurfacesRealError(t *testing.T) {
+	const rounds = 30
+	realErr := errors.New("payment gateway 503")
+	for i := 0; i < rounds; i++ {
+		ran := make(chan struct{}, 1)
+		gate := make(chan struct{}) // 任务 B 的阻塞点（经父 ctx 取消解除）
+		a := NewAsync(2)
+		a.Add(
+			&failFastTask{ran: ran, err: realErr}, // A：快速真实失败 → firstErr → 流程 cancel
+			&gateRunnable{gate: gate},             // B：阻塞至父 ctx 取消 → 豁免记 nil
+		)
+
+		parent, pcancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- a.Run(parent) }()
+
+		<-ran     // A 已失败：firstErr 已记录、流程 cancel 已触发，B 仍阻塞
+		pcancel() // 父 ctx 取消：B 解除阻塞走豁免，finalizer 随后写入真实错误
+
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, realErr) {
+				t.Fatalf("round %d: real task error masked by ctx cancellation: got %v, want %v (#61)", i+1, err, realErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: Run did not return within budget (drain after cancel hung)", i+1)
+		}
+	}
+}
+
+// TestAsyncFlow_RunAsync_ParentCancelAndRealError_SurfacesRealError 同型覆盖
+// RunAsync 路径：真实错误已入 future，消费方以已取消的 ctx Wait 时不得把
+// 真实错误掩蔽为 context.Canceled（Wait 双就绪优先非取消类缓存错误）。
+func TestAsyncFlow_RunAsync_ParentCancelAndRealError_SurfacesRealError(t *testing.T) {
+	const rounds = 30
+	realErr := errors.New("payment gateway 503")
+	for i := 0; i < rounds; i++ {
+		ran := make(chan struct{}, 1)
+		gate := make(chan struct{})
+		a := NewAsync(2)
+		a.Add(
+			&failFastTask{ran: ran, err: realErr},
+			&gateRunnable{gate: gate},
+		)
+
+		parent, pcancel := context.WithCancel(context.Background())
+		future := a.RunAsync(parent)
+
+		<-ran
+		pcancel() // B 解除阻塞走豁免，finalizer 把真实错误写入 future
+
+		// 等 finalizer 完成入账（同包直读 done 关闭广播，channel 同步不轮询）：
+		// 钉住「结果已就绪 + 消费方 ctx 已取消」的双就绪形态——Wait 不得把
+		// 真实错误掷硬币成 context.Canceled。
+		<-future.done
+		if err := future.Wait(parent); !errors.Is(err, realErr) {
+			t.Fatalf("round %d: real task error masked by ctx cancellation: got %v, want %v (#61)", i+1, err, realErr)
+		}
+	}
+}

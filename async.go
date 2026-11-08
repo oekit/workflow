@@ -78,6 +78,10 @@ func (a *AsyncFlow) snapshot() ([]Runnable, *HookManager) {
 
 // Run 并发执行所有任务，阻塞直到全部完成或 context 取消。
 // 如需非阻塞模式，请使用 RunAsync。
+//
+// 错误面契约（#61）：父 ctx 取消与任务真实错误并存时，确定性返回真实
+// 任务错误（与 ParallelFlow 同场景语义对齐）；无真实错误时返回 ctx.Err()
+// （#35 取消不得假成功）。
 func (a *AsyncFlow) Run(ctx context.Context) error {
 	tasks, hm := a.snapshot()
 	if len(tasks) == 0 {
@@ -121,7 +125,21 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 		cancel()
 	})
 
-	return future.Wait(parentCtx)
+	err := future.Wait(parentCtx)
+	if isCancellationErr(err) {
+		// #61：父 ctx 取消与任务真实错误并存时错误面不得掷硬币——此前
+		// Wait 的双就绪 select 实测 29/30 返回 context.Canceled，把真实
+		// 错误（如 DB 约束冲突）掩蔽为「流程被取消」，与 ParallelFlow
+		// 同场景恒返回真实错误分叉。对齐 ParallelFlow 的「先 drain 完任务
+		// 结果再看 ctx」：任务与流程共享取消源（childCtx 派生自同一
+		// parent），答取消的任务会很快收尾，此处等待的只是收尾窗口
+		//（无真实错误时仍返回 ctx.Err()，#35 取消不得假成功）。
+		<-future.done
+		if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
+			return cached
+		}
+	}
+	return err
 }
 
 // RunAsync 异步执行所有任务，返回 Future。
