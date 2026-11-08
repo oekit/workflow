@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/workflow@v0.3.8
+go get github.com/oekit/workflow@v0.3.9
 ```
 
 ## 这个仓库做什么
