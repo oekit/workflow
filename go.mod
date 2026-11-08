@@ -3,6 +3,6 @@ module github.com/oekit/workflow
 go 1.24.0
 
 require (
-	github.com/oekit/concurrency v0.28.4
-	github.com/oekit/logx v0.8.10
+	github.com/oekit/concurrency v0.29.0
+	github.com/oekit/logx v0.8.11
 )
