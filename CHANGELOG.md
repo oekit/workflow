@@ -2,6 +2,13 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.10] — 2026-11-09
+
+- fix(async): Run 取消与真实错误并存时错误面确定（#61）
+- fix(common): safeRun After-hook panic 与任务错误 Join（#62）
+
+关联问题单：workflow#61、workflow#62。
+
 ## [v0.3.9] — 2026-11-08
 
 - build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）
