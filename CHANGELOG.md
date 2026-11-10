@@ -20,6 +20,10 @@
 
 关联问题单：oekit/workflow#83。
 
+- **BREAKING** fix(hook): After 改按逆注册序执行——AOP 洋葱配对恢复，span/事务类嵌套 hook 不再交叉关闭（#84）——此前 Before 正序、After 也正序，外层 hook 的收尾先于内层执行（TracingHook 先关 span 导致 AuditHook 事件丢失/挂错 parent，事务型 hook 的 COMMIT 先于内层收尾）；文档原明写「按注册序调用 After」属契约设计缺陷，本版改为逆序并同步 hook_manager.go/hook.go/doc.go 文案（0.x breaking：依赖 After 正序的消费方需反转收尾逻辑）
+
+关联问题单：oekit/workflow#84。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

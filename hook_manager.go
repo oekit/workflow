@@ -36,7 +36,8 @@ func (m *HookManager) Before(ctx context.Context, r Runnable) error {
 	return err
 }
 
-// After 依次调用所有 Hook 的 After 方法。
+// After 按逆注册序依次调用所有 Hook 的 After 方法（#84：AOP 洋葱配对，
+// Before 正序开、After 逆序关）。
 // 这是无配对信息的直调入口：对全部 hook 触发。safeRun 执行路径不走本
 // 方法——其 After 与 Before 逐 hook 配对触发（见 afterRun，#81）。
 // 单个 hook 的 After panic 被逐 hook recover（聚合为 error，执行路径由
@@ -60,13 +61,15 @@ func (m *HookManager) beforeRun(ctx context.Context, r Runnable) (int, error) {
 	return len(m.hooks), nil
 }
 
-// afterRun 对前 n 个 hook（其 Before 已执行）依次触发 After（#81 配对），
-// 逐 hook recover：任一 hook 的 After panic 不得截断后续 hook 的 After
+// afterRun 对前 n 个 hook（其 Before 已执行）按逆注册序触发 After（#81
+// 配对；#84 逆序 = AOP 洋葱配对——Before 正序开的 span/事务逆序关，
+// span/事务类嵌套 hook 不再交叉关闭），逐 hook recover：
+// 任一 hook 的 After panic 不得截断后续 hook 的 After
 // （配对进一步撕裂），panic 聚合为 error 返回（由 safeRun 按 #62 口径
 // 与任务错误 join）。
 func (m *HookManager) afterRun(ctx context.Context, r Runnable, err error, n int) error {
 	var hookErr error
-	for i := 0; i < n; i++ {
+	for i := n - 1; i >= 0; i-- {
 		hookErr = errors.Join(hookErr, callHookAfter(ctx, m.hooks[i], r, err))
 	}
 	return hookErr

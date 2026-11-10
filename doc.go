@@ -60,6 +60,10 @@
 //
 // # Hook AOP
 //
+// Before 按注册序触发、After 按逆注册序触发（洋葱配对，#84）：注册序
+// [LogHook, MetricsHook] 时 Before 先 Log 后 Metrics，After 先 Metrics
+// 后 Log——span/事务类嵌套 hook 正确交叉关闭。
+//
 //	hook := workflow.NewHookManager()
 //	hook.Add(&LogHook{}, &MetricsHook{})
 //

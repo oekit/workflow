@@ -584,6 +584,49 @@ func TestHookManager_AfterOnlyForHooksWithExecutedBefore(t *testing.T) {
 	}
 }
 
+// orderHook 把 Before/After 的调用顺序记录到共享切片（#84 用；
+// 仅同步执行场景使用）。
+type orderHook struct {
+	name  string
+	order *[]string
+}
+
+func (h *orderHook) Before(context.Context, Runnable) error {
+	*h.order = append(*h.order, "before:"+h.name)
+	return nil
+}
+
+func (h *orderHook) After(context.Context, Runnable, error) {
+	*h.order = append(*h.order, "after:"+h.name)
+}
+
+// TestHookManager_AfterReverseOrder 是 #84 的回归钉：AOP/中间件洋葱模型
+// 要求 After 逆序（LIFO）——Before 正序开的 span/事务必须逆序关，否则
+// 外层 hook 的收尾先于内层执行（如 TracingHook 先关 span、AuditHook 的
+// 事件丢失或挂错 parent；事务型 hook 的 COMMIT 先于内层收尾）。
+// Before 保持注册序正序。
+func TestHookManager_AfterReverseOrder(t *testing.T) {
+	var order []string
+	hm := NewHookManager()
+	hm.Add(&orderHook{name: "A", order: &order},
+		&orderHook{name: "B", order: &order},
+		&orderHook{name: "C", order: &order})
+
+	err := safeRun(context.Background(), &okTask{}, hm)
+	if err != nil {
+		t.Fatalf("safeRun: %v", err)
+	}
+	want := []string{"before:A", "before:B", "before:C", "after:C", "after:B", "after:A"}
+	if len(order) != len(want) {
+		t.Fatalf("hook call order: got %v, want %v (#84：After 必须逆序)", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("hook call order: got %v, want %v (#84：After 必须逆序)", order, want)
+		}
+	}
+}
+
 func TestHookManager_Len(t *testing.T) {
 	hm := NewHookManager()
 	if hm.Len() != 0 {
