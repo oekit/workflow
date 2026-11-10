@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -224,12 +225,31 @@ func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 }
 
 // AsyncResult 异步执行结果。
-// Error 为 nil 表示任务确实跑完且成功；被兄弟任务失败砍掉/未执行的任务
-// 报 context.Canceled 类错误（#82：「成功」与「被打断」可区分）；调用方
-// context 取消的副作用被豁免记 nil。
+//
+// Error 的三态语义（#82）——「成功 / 失败 / 未执行」可辨：
+//   - Error == nil：任务确实跑完且成功（调用方 context 取消/超时时，取消
+//     副作用的豁免结果同样记 nil，#45）；
+//   - errors.Is(Error, ErrSkipped)：任务未执行——流程内部取消（兄弟任务
+//     失败连带砍掉）后未开始即被跳过（错误链同时携带 ctx 取消错误）；
+//   - 其余非 nil：任务失败——含执行中被内部取消打断的任务自报的取消错误
+//     （通常 errors.Is(Error, context.Canceled)），以及任务自身的取消类
+//     失败（调用方 context 健康时原样上报，绝不吞错）。
 type AsyncResult struct {
 	Index int
 	Error error
+}
+
+// ErrSkipped 标记「任务未执行」：RunAsyncWithResults 的结果中，错误链含本
+// 哨兵（errors.Is 判定）表示该任务因流程内部取消（兄弟任务失败连带）未开始
+// 即被跳过——三态中的「未执行」，区别于「确实成功」（Error == nil）与
+// 「执行失败」（其余非 nil）。
+var ErrSkipped = errors.New("task skipped")
+
+// skippedErr 合成「任务未执行」错误（#82）：ctx 取消导致任务未开始即被
+// 跳过。错误链同时携带 context 错误与 ErrSkipped 哨兵——调用方经 errors.Is
+// 判定三态中的「未执行」，与「执行失败」「确实成功」区分。
+func skippedErr(idx int, ctx context.Context) error {
+	return fmt.Errorf("workflow: task %d not started: %w (%w)", idx, ctx.Err(), ErrSkipped)
 }
 
 // RunAsyncWithResults 异步执行所有任务，返回结果通道。
@@ -243,7 +263,8 @@ type AsyncResult struct {
 // 结果记为 Error: nil（不计为任务失败，每个任务恰好一条结果，Index
 // 连续）；调用方 context 健康时，任务自身的超时/取消失败必须原样上报。
 // 兄弟任务失败触发的框架内部取消不豁免：被砍/未执行的任务报
-// context.Canceled 类错误，与「确实跑完」（Error: nil）可区分。
+// context.Canceled 类错误（未开始即被跳过的任务错误链另携带 ErrSkipped
+// 哨兵，见 AsyncResult 三态），与「确实跑完」（Error: nil）可区分。
 // 因此「通道内全部 Error 为 nil」不代表流程未被取消，调用方需结合自身
 // context 判断整体执行状态。
 func (a *AsyncFlow) RunAsyncWithResults(ctx context.Context) <-chan AsyncResult {
@@ -316,7 +337,7 @@ func goSafeExecute(
 				case sem <- struct{}{}:
 				case <-ctx.Done():
 					if resultFn != nil {
-						resultFn(idx, fmt.Errorf("workflow: task %d cancelled: %w", idx, ctx.Err()))
+						resultFn(idx, skippedErr(idx, ctx))
 					}
 					return
 				}
@@ -325,7 +346,7 @@ func goSafeExecute(
 
 			if err := ctx.Err(); err != nil {
 				if resultFn != nil {
-					resultFn(idx, fmt.Errorf("workflow: task %d cancelled: %w", idx, err))
+					resultFn(idx, skippedErr(idx, ctx))
 				}
 				return
 			}
