@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -261,36 +263,41 @@ func TestAsyncFlow_RunAsyncWithResults_PreCancelledCtxExempted(t *testing.T) {
 // 无聚合面，nil=成功会把半成品/未执行任务静默记成功。）
 func TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError(t *testing.T) {
 	realErr := errors.New("db down: real failure")
-	a := NewAsync(4)
-	a.Add(
-		&mockRunnable{name: "slow", delay: 200 * time.Millisecond}, // 会被失败任务的 cancel 打断 → 取消类错误
-		&errTask{err: realErr}, // 立即失败的真实错误
-	)
+	// 屏障定序（不 sleep 猜时序）：slow 先启动并阻塞在 gate 上（在途形态
+	// 钉死），kickoff 放行 failer → failer 真实失败 → 内部 cancel → slow
+	// 经 ctx.Done 解除阻塞上报取消错误。
+	slowStarted := make(chan struct{})
+	slowGate := make(chan struct{})
+	slow := funcRunnable(func(ctx context.Context) error {
+		close(slowStarted)
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // 被内部取消打断：自报取消错误
+		case <-slowGate:
+			return nil
+		}
+	})
+	kickoff := make(chan struct{})
+	failer := funcRunnable(func(context.Context) error {
+		<-kickoff
+		return realErr
+	})
+	a := NewAsync(2)
+	a.Add(slow, failer)
 
-	got := collectResults(t, a.RunAsyncWithResults(context.Background()))
+	results := a.RunAsyncWithResults(context.Background()) // 调用方 ctx 全程健康
+	<-slowStarted
+	close(kickoff)
+
+	got := collectResults(t, results)
 	if len(got) != 2 {
 		t.Fatalf("expected exactly 2 results, got %d", len(got))
 	}
-	realCount := 0
-	cancelCount := 0
-	for idx, err := range got {
-		switch {
-		case errors.Is(err, realErr):
-			realCount++
-		case errors.Is(err, context.Canceled):
-			// 被砍任务：可区分的取消错误（#82）
-			cancelCount++
-		case err == nil:
-			t.Errorf("task %d: 被砍任务记 Error: nil 与「确实跑完」不可区分（#82）", idx)
-		default:
-			t.Errorf("task %d: unexpected error %v", idx, err)
-		}
+	if err := got[0]; err == nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("task 0: 被砍任务须上报可区分的取消错误，不得记 Error: nil（#82），got %v", err)
 	}
-	if realCount != 1 {
-		t.Fatalf("expected real error reported exactly once, got %d", realCount)
-	}
-	if cancelCount != 1 {
-		t.Fatalf("expected killed task reported as context.Canceled exactly once, got %d (#82)", cancelCount)
+	if err := got[1]; !errors.Is(err, realErr) {
+		t.Errorf("task 1: real error must be reported as-is, got %v", err)
 	}
 }
 
@@ -312,7 +319,7 @@ func TestAsyncFlow_RunAsyncWithResults_SiblingFailureDoesNotSwallowTaskErrors(t 
 	targetStarted := make(chan struct{})
 	target := funcRunnable(func(ctx context.Context) error {
 		close(targetStarted)
-		time.Sleep(150 * time.Millisecond) // 跑满并返回自身超时错误（不看 ctx）
+		<-ctx.Done() // 等兄弟失败引发的内部取消到达后返回自身超时错误（不看取消身份，只认自己的失败）
 		return targetErr
 	})
 	sibling := funcRunnable(func(ctx context.Context) error {
@@ -395,34 +402,35 @@ func TestAsyncFlow_Run_ParentCancelAndRealError_SurfacesRealError(t *testing.T) 
 // 有界收尾窗口（#61 的真实错误浮出用），不得无界等待不合作任务自然返回。
 // 修复前收尾 drain 是裸 <-future.done：任务 goroutine 不收尾 Run 就不返回，
 // 任务挂多久调用方的关停流程挂多久（契约中「context 取消」一侧失效）。
+// 定序全走屏障（started 信号 + 永不关闭的 block channel，t.Cleanup 放行
+// 后台收尾），不 sleep 猜「任务已启动」。
 func TestAsyncFlow_Run_CancelReturnsBeforeNonCooperativeTaskFinishes(t *testing.T) {
-	const taskDuration = 3 * time.Second
+	block := make(chan struct{}) // 任务收尾完全由测试控制：断言前绝不放行
+	started := make(chan struct{})
 	a := NewAsync(2)
-	a.Add(funcRunnable(func(ctx context.Context) error {
-		time.Sleep(taskDuration) // 不合作任务：不看 ctx
+	a.Add(funcRunnable(func(context.Context) error {
+		close(started)
+		<-block // 不合作任务：不看 ctx，模拟未接 ctx 的阻塞调用
 		return nil
 	}))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	start := time.Now()
+	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- a.Run(ctx) }()
 
-	time.Sleep(100 * time.Millisecond) // 任务已启动
-	cancel()
+	<-started // 任务已阻塞在 block 上（此后对 ctx 取消无动于衷）
+	cancel()  // 优雅关停
 
 	select {
 	case err := <-runErr:
-		elapsed := time.Since(start)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("want context.Canceled, got %v", err)
 		}
-		if elapsed >= taskDuration/2 {
-			t.Fatalf("Run returned after %v (cancel at 100ms)：ctx 取消后仍无界等待任务收尾（#80）", elapsed)
-		}
-	case <-time.After(taskDuration / 2):
-		t.Fatalf("Run did not return within %v after cancel：不合作任务让 Run 挂死（#80）", taskDuration/2)
+	case <-time.After(5 * time.Second): // runCancelDrainGrace(500ms) 的大量级裕量
+		t.Fatal("Run did not return within the bounded drain window：不合作任务让 Run 挂死（#80）")
 	}
+	t.Cleanup(func() { close(block) }) // 断言完毕后放行后台收尾
 }
 
 // TestAsyncFlow_RunAsync_ParentCancelAndRealError_SurfacesRealError 同型覆盖
@@ -453,5 +461,137 @@ func TestAsyncFlow_RunAsync_ParentCancelAndRealError_SurfacesRealError(t *testin
 		if err := future.Wait(parent); !errors.Is(err, realErr) {
 			t.Fatalf("round %d: real task error masked by ctx cancellation: got %v, want %v (#61)", i+1, err, realErr)
 		}
+	}
+}
+
+// --- #82 补充：ErrSkipped 哨兵——三态中的「未执行」显式可辨 ---
+
+// gatedFailTask 启动时发信号并阻塞在自家 gate 上，放行后返回固定错误
+// （ErrSkipped 用例：maxProcess=1 下与兄弟任务竞争唯一槽位，先后不定但
+// 两侧断言对称——恰一个真实失败、一个未执行）。
+type gatedFailTask struct {
+	startedOnce sync.Once
+	started     chan struct{}
+	gate        chan struct{}
+	runs        atomic.Int32
+	err         error
+}
+
+func (t *gatedFailTask) Run(ctx context.Context) error {
+	t.runs.Add(1)
+	t.startedOnce.Do(func() { close(t.started) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.gate:
+		return t.err
+	}
+}
+
+// TestAsyncFlow_RunAsyncWithResults_SkippedTaskMarkedErrSkipped 钉住 #82
+// 三态中的「未执行」：maxProcess=1 下兄弟任务真实失败触发内部取消，排队
+// 任务未开始即被跳过——结果必须携带 ErrSkipped 哨兵（errors.Is 可辨），
+// 既不得记为 Error:nil（假成功），也不得伪装成执行失败。
+// maxProcess=1 下两任务竞争唯一槽位，先到者持槽阻塞于自家 gate、后到者
+// 排队；放行先后不定，但两侧断言对称，结果不受调度影响。
+func TestAsyncFlow_RunAsyncWithResults_SkippedTaskMarkedErrSkipped(t *testing.T) {
+	realErr := errors.New("db down: real failure")
+	ta := &gatedFailTask{started: make(chan struct{}), gate: make(chan struct{}), err: realErr}
+	tb := &gatedFailTask{started: make(chan struct{}), gate: make(chan struct{}), err: realErr}
+	a := NewAsync(1) // 唯一槽位：先到者持槽阻塞，后到者排队
+	a.Add(ta, tb)
+
+	results := a.RunAsyncWithResults(context.Background())
+	// 屏障：任一任务已持槽执行——槽位独占，另一个必然尚未开始
+	select {
+	case <-ta.started:
+	case <-tb.started:
+	}
+	close(ta.gate)
+	close(tb.gate)
+
+	got := collectResults(t, results)
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 results, got %d", len(got))
+	}
+	tasks := []*gatedFailTask{ta, tb}
+	failed, skipped := 0, 0
+	for idx, task := range tasks {
+		err := got[idx]
+		switch {
+		case errors.Is(err, realErr):
+			failed++
+			if got := task.runs.Load(); got != 1 {
+				t.Errorf("failing task %d must run exactly once, got %d", idx, got)
+			}
+		case errors.Is(err, ErrSkipped):
+			skipped++
+			if got := task.runs.Load(); got != 0 {
+				t.Errorf("skipped task %d must never run, got %d runs", idx, got)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("skip error must also chain the ctx error, got %v", err)
+			}
+		default:
+			t.Errorf("task %d: unexpected result %v (want realErr or ErrSkipped)", idx, err)
+		}
+	}
+	if failed != 1 || skipped != 1 {
+		t.Fatalf("want exactly 1 failed + 1 skipped, got %d failed + %d skipped", failed, skipped)
+	}
+}
+
+// TestAsyncFlow_RunAsyncWithResults_SkippedExemptedWhenCallerCancelled 钉住
+// ErrSkipped 与 #45 豁免语义的组合面：调用方 ctx 主动取消时，未执行任务的
+// ErrSkipped 合成错误仍走豁免记 nil——三态收紧不得改变调用方主动取消的
+// 既有语义（ErrSkipped 只在调用方 ctx 健康时出现）。
+func TestAsyncFlow_RunAsyncWithResults_SkippedExemptedWhenCallerCancelled(t *testing.T) {
+	ran := false
+	a := NewAsync(1)
+	a.Add(&okTask{ran: &ran})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 调用方主动取消：任务未执行
+
+	got := collectResults(t, a.RunAsyncWithResults(ctx))
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 result, got %d", len(got))
+	}
+	if got[0] != nil {
+		t.Errorf("caller-cancelled skip must stay exempted (nil, #45), got %v", got[0])
+	}
+	if ran {
+		t.Error("tasks must not run after cancellation")
+	}
+}
+
+// TestAsyncFlow_Run_BoundedDrainStillSurfacesRealError 钉住 #80 与 #61 的
+// 组合面：收尾窗口有界化不得破坏「真实错误优先」——合规响应 ctx 的任务
+// 在窗口内收尾，其真实错误仍确定性浮出（屏障定序：failFast 先失败入账、
+// gate 任务经父 ctx 取消收尾，不 sleep 猜）。
+func TestAsyncFlow_Run_BoundedDrainStillSurfacesRealError(t *testing.T) {
+	realErr := errors.New("payment gateway 503")
+	gate := make(chan struct{})
+	ran := make(chan struct{}, 1)
+	a := NewAsync(2)
+	a.Add(
+		&gateRunnable{gate: gate},             // 合规任务：阻塞至父 ctx 取消后收尾
+		&failFastTask{ran: ran, err: realErr}, // 快速真实失败
+	)
+
+	parent, pcancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- a.Run(parent) }()
+
+	<-ran     // failFast 已失败：firstErr 已记录、流程 cancel 已触发
+	pcancel() // 父 ctx 取消：gate 任务经 ctx.Done 收尾，真实错误在窗口内入账
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, realErr) {
+			t.Fatalf("real task error must surface within bounded drain (#61), got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run must return within the bounded drain window")
 	}
 }
