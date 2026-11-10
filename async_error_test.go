@@ -335,6 +335,41 @@ func TestAsyncFlow_Run_ParentCancelAndRealError_SurfacesRealError(t *testing.T) 
 	}
 }
 
+// TestAsyncFlow_Run_CancelReturnsBeforeNonCooperativeTaskFinishes 是 #80 的
+// 回归钉：契约「阻塞直到全部完成或 context 取消」——ctx 取消后 Run 只留
+// 有界收尾窗口（#61 的真实错误浮出用），不得无界等待不合作任务自然返回。
+// 修复前收尾 drain 是裸 <-future.done：任务 goroutine 不收尾 Run 就不返回，
+// 任务挂多久调用方的关停流程挂多久（契约中「context 取消」一侧失效）。
+func TestAsyncFlow_Run_CancelReturnsBeforeNonCooperativeTaskFinishes(t *testing.T) {
+	const taskDuration = 3 * time.Second
+	a := NewAsync(2)
+	a.Add(funcRunnable(func(ctx context.Context) error {
+		time.Sleep(taskDuration) // 不合作任务：不看 ctx
+		return nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	runErr := make(chan error, 1)
+	go func() { runErr <- a.Run(ctx) }()
+
+	time.Sleep(100 * time.Millisecond) // 任务已启动
+	cancel()
+
+	select {
+	case err := <-runErr:
+		elapsed := time.Since(start)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+		if elapsed >= taskDuration/2 {
+			t.Fatalf("Run returned after %v (cancel at 100ms)：ctx 取消后仍无界等待任务收尾（#80）", elapsed)
+		}
+	case <-time.After(taskDuration / 2):
+		t.Fatalf("Run did not return within %v after cancel：不合作任务让 Run 挂死（#80）", taskDuration/2)
+	}
+}
+
 // TestAsyncFlow_RunAsync_ParentCancelAndRealError_SurfacesRealError 同型覆盖
 // RunAsync 路径：真实错误已入 future，消费方以已取消的 ctx Wait 时不得把
 // 真实错误掩蔽为 context.Canceled（Wait 双就绪优先非取消类缓存错误）。

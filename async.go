@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/oekit/concurrency/async"
 )
+
+// runCancelDrainGrace 是 Run 在 context 取消后等待任务收尾的宽限窗口（#80）。
+// 窗口内收尾的任务仍能把真实错误浮出（#61 的错误面契约）；超时即返回取消
+// 错误——不合作任务（不响应 ctx 的阻塞）不再让 Run 无界挂死。
+const runCancelDrainGrace = 500 * time.Millisecond
 
 // AsyncFlow 异步执行多个任务。
 // 返回 Future，不阻塞调用方。
@@ -134,9 +140,20 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 		// 结果再看 ctx」：任务与流程共享取消源（childCtx 派生自同一
 		// parent），答取消的任务会很快收尾，此处等待的只是收尾窗口
 		// （无真实错误时仍返回 ctx.Err()，#35 取消不得假成功）。
-		<-future.done
-		if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
-			return cached
+		//
+		// #80：收尾等待必须有界——「会很快收尾」只是对合作任务成立的假设，
+		// Runnable 完全可以不看 ctx（time.Sleep、未接 ctx 的 RPC 等）。裸
+		// <-future.done 要等全部任务 goroutine 收尾，任务挂多久 Run 挂多久，
+		// 与「阻塞直到全部完成或 context 取消」契约中「context 取消」一侧
+		// 直接相悖。改为有界宽限：窗口内完成仍浮出真实错误（#61 不回退），
+		// 超时即按契约返回取消错误。
+		select {
+		case <-future.done:
+			if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
+				return cached
+			}
+		case <-time.After(runCancelDrainGrace):
+			return err
 		}
 	}
 	return err

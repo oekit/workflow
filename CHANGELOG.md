@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [Unreleased]
+
+- fix(async): Run 的取消后收尾 drain 加上界——ctx 取消后最多再等 runCancelDrainGrace（500ms）的收尾窗口以浮出真实错误（#61 语义不回退），超时即按契约返回取消错误（#80）——此前收尾是裸 `<-future.done`，要等全部任务 goroutine 收尾，不合作任务（不响应 ctx 的阻塞）挂多久 Run 就挂多久，「阻塞直到全部完成或 context 取消」契约的「context 取消」一侧失效
+
+关联问题单：oekit/workflow#80。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）
