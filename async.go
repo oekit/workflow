@@ -89,7 +89,17 @@ func (a *AsyncFlow) snapshot() ([]Runnable, *HookManager) {
 // 任务错误（与 ParallelFlow 同场景语义对齐）；无真实错误时返回 ctx.Err()
 // （#35 取消不得假成功）。
 func (a *AsyncFlow) Run(ctx context.Context) error {
-	tasks, hm := a.snapshot()
+	_, hm := a.snapshot()
+	return a.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
+// 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
+func (a *AsyncFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	tasks, ownHM := a.snapshot()
+	if hm == nil {
+		hm = ownHM
+	}
 	if len(tasks) == 0 {
 		return nil
 	}

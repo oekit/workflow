@@ -52,7 +52,9 @@
 //
 // 各 Flow 的 Add/Case、Hooks、SetHookManager 内部加锁，与 Run 并发调用
 // 不构成数据竞争。Run 以启动瞬间的成员快照执行：执行期间新增的任务/分支、
-// 替换的 HookManager 不影响本次 Run，下次 Run 生效。
+// 替换的 HookManager 不影响本次 Run，下次 Run 生效——含嵌套子流程的本次
+// 执行（子流程以父流程快照中的 manager 执行，SetHookManager 的递归传播
+// 不穿透在途执行，#83）。
 // 注意 HookManager 自身不在此列——Run 期间向 HookManager 注册 Hook 仍是
 // 数据竞争，Hook 必须在 Run 之前注册完毕（见 HookManager 并发契约）。
 //

@@ -77,7 +77,17 @@ func (p *ParallelFlow) SetHookManager(hm *HookManager) {
 // context.Canceled/DeadlineExceeded 才视为取消的副作用被豁免；调用方
 // context 健康时，任务自身的超时/取消失败必须上报。
 func (p *ParallelFlow) Run(ctx context.Context) error {
-	tasks, hm := p.snapshot()
+	_, hm := p.snapshot()
+	return p.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
+// 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
+func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	tasks, ownHM := p.snapshot()
+	if hm == nil {
+		hm = ownHM
+	}
 	if len(tasks) == 0 {
 		return nil
 	}

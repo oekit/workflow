@@ -16,6 +16,10 @@
 
 关联问题单：oekit/workflow#82。
 
+- fix(pipe): Run 期间 SetHookManager 不再穿透嵌套快照契约——子流程本次执行以父流程快照的 manager 运行，同一 Run 不再混用两套 hook（#83）——此前 SetHookManager 立即递归写穿子流程的 manager 字段，而子流程稍后启动的执行读自己字段的快照，#46「本次 Run 继续使用快照中的旧 manager」的承诺只对直接层成立（AsyncFlow/SwitchFlow 同构，一并修复）
+
+关联问题单：oekit/workflow#83。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

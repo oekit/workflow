@@ -201,6 +201,83 @@ func TestAsyncFlow_ConcurrentAddDuringRunAsync(t *testing.T) {
 	}
 }
 
+// TestNestedFlow_SetHookManagerDuringRun_NoPenetration 是 #83 的回归钉：
+// #46 的快照契约「与 Run 并发调用是安全的：本次 Run 继续使用快照中的旧
+// manager」必须对嵌套层同样成立。修复前 SetHookManager 立即向子流程递归
+// 传播（写穿子流程自己的 manager 字段），而子流程稍后启动的执行读的是
+// 自己字段的快照——同一 Run 混用两套 hook（外层 hm1、子层 hm2），
+// 审计/追踪覆盖撕裂（无数据竞争，-race 抓不到，纯语义违约）。
+func TestNestedFlow_SetHookManagerDuringRun_NoPenetration(t *testing.T) {
+	newCounting := func() (*HookManager, *mockHook) {
+		hm := NewHookManager()
+		h := &mockHook{}
+		hm.Add(h)
+		return hm, h
+	}
+
+	subtests := []struct {
+		name string
+		// child 构造子流程，返回子流程与其内部步骤数
+		// （hook 在每层容器/步骤各触发一次）。
+		child func() (Runnable, int32)
+	}{
+		{"pipe", func() (Runnable, int32) {
+			c := NewPipe()
+			c.Add(&mockRunnable{name: "stepA"}, &mockRunnable{name: "stepB"})
+			return c, 2
+		}},
+		{"async", func() (Runnable, int32) {
+			c := NewAsync(0)
+			c.Add(&mockRunnable{name: "taskA"}, &mockRunnable{name: "taskB"})
+			return c, 2
+		}},
+		{"switch", func() (Runnable, int32) {
+			c := NewSwitch(func(ctx context.Context) string { return "go" })
+			c.Case("go", &mockRunnable{name: "branch"})
+			return c, 1
+		}},
+	}
+	for _, tc := range subtests {
+		t.Run(tc.name, func(t *testing.T) {
+			hm1, h1 := newCounting()
+			hm2, h2 := newCounting()
+
+			gateTask := newStartedGateTask()
+			child, childSteps := tc.child()
+
+			pipe := NewPipe()
+			pipe.SetHookManager(hm1)
+			pipe.Add(gateTask, child)
+
+			runDone := make(chan error, 1)
+			go func() { runDone <- pipe.Run(context.Background()) }()
+			<-gateTask.started // 父 Run 已快照 hm1 且执行中
+
+			pipe.SetHookManager(hm2) // 穿透企图：递归写穿子流程字段
+			close(gateTask.gate)
+
+			if err := <-runDone; err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			// 契约预期：本次 Run 全程 hm1（父层 gate+子容器 2 次 + 子层
+			// childSteps 次），hm2 本次 Run 一次都不触发
+			want := 2 + childSteps
+			if got := h1.beforeCount.Load(); got != want {
+				t.Errorf("hm1 before=%d (want %d：本次 Run 全程用快照 manager，#83)", got, want)
+			}
+			if got := h1.afterCount.Load(); got != want {
+				t.Errorf("hm1 after=%d (want %d)", got, want)
+			}
+			if got := h2.beforeCount.Load(); got != 0 {
+				t.Errorf("hm2 before=%d (want 0：Run 期间替换的 manager 不得穿透嵌套快照，#83)", got)
+			}
+			if got := h2.afterCount.Load(); got != 0 {
+				t.Errorf("hm2 after=%d (want 0)", got)
+			}
+		})
+	}
+}
+
 // TestSwitchFlow_ConcurrentCaseDuringRun 回归测试（#46）：Run 期间并发 Case
 // 不再是数据竞争（修复前并发写 map 与 Run 读直接构成竞争，Go runtime 对
 // 并发写 map 会 fatal）。本次 Run 执行选中的快照分支，下次 Run 拾取新分支。

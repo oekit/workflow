@@ -37,6 +37,14 @@ func setHookManagerByRunnable(runnable Runnable, hm *HookManager) {
 	flow.SetHookManager(hm)
 }
 
+// hookScopedRunner 是「以显式 HookManager 执行」的内部接口（#83）。
+// 嵌套执行时父流程把自己快照中的 manager 传给子流程的本次执行，子流程
+// 不读自身字段——Run 期间 SetHookManager 的递归传播无法穿透正在进行的
+// 执行（#46 快照契约对嵌套层同样成立）。
+type hookScopedRunner interface {
+	runWithHooks(ctx context.Context, hm *HookManager) error
+}
+
 // safeRun 执行 Hook + Runnable，捕获 panic 转为 error。
 // 与 ParallelFlow/AsyncFlow 的 goSafeExecute 行为一致。
 // After hook 在 Run 正常返回或 panic 时都会触发（通过 defer 保证），
@@ -78,6 +86,13 @@ func safeRun(ctx context.Context, r Runnable, hm *HookManager) (err error) {
 		if berr != nil {
 			return berr
 		}
+	}
+
+	// 嵌套子流程以显式 manager 执行（#83）：本次执行的 hook 全程用父流程
+	// 快照中的 manager，不受执行期间 SetHookManager 递归传播的穿透影响。
+	if hr, ok := r.(hookScopedRunner); ok {
+		err = hr.runWithHooks(ctx, hm)
+		return err
 	}
 
 	err = r.Run(ctx)

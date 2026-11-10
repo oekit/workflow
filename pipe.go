@@ -65,7 +65,19 @@ func (p *PipeFlow) SetHookManager(hm *HookManager) {
 // 任一步骤失败或 context 取消则停止并返回错误。
 // Hook 或 Runnable 的 panic 会被捕获并转为 error 返回。
 func (p *PipeFlow) Run(ctx context.Context) error {
-	steps, hm := p.snapshot()
+	_, hm := p.snapshot()
+	return p.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83）：嵌套执行时父流程
+// 把自己快照中的 manager 传下来，本方法不读自身 manager 字段——Run 期间
+// SetHookManager 的递归传播无法穿透正在进行的执行。hm 为 nil 时退回自身
+// 快照（兼容外部直调）。
+func (p *PipeFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	steps, ownHM := p.snapshot()
+	if hm == nil {
+		hm = ownHM
+	}
 	for i, r := range steps {
 		// 检查 context 是否已取消
 		if err := ctx.Err(); err != nil {
