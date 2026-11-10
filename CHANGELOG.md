@@ -2,7 +2,9 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [Unreleased]
+## [v0.4.0] — 2026-11-11
+
+审计清扫轮（#80–#84）。定版 v0.4.0 而非 v0.3.13：#82 补充新增公开 API——结果三态哨兵 `ErrSkipped`（区分「未执行」，`errors.Is` 判定）；另有 #84 的 After 回放顺序契约变更（0.x minor 允许 breaking）。
 
 - fix(async): Run 的取消后收尾 drain 加上界——ctx 取消后最多再等 runCancelDrainGrace（500ms）的收尾窗口以浮出真实错误（#61 语义不回退），超时即按契约返回取消错误（#80）——此前收尾是裸 `<-future.done`，要等全部任务 goroutine 收尾，不合作任务（不响应 ctx 的阻塞）挂多久 Run 就挂多久，「阻塞直到全部完成或 context 取消」契约的「context 取消」一侧失效
 
@@ -12,7 +14,7 @@
 
 关联问题单：oekit/workflow#81。
 
-- fix(async): 取消类错误豁免判据改测调用方 ctx——兄弟失败砍掉的任务不再记 Error:nil，报 context.Canceled 与「确实跑完」可区分；任务自身的超时错误不再被兄弟失败连带吞掉（#82）——此前四处判据测的是框架派生、会被框架在任务失败时 cancel 的 childCtx，退化成「此刻有没有兄弟失败过」，doc「绝不吞错」形态被吞；行为变更：RunAsyncWithResults 中被砍/未执行任务的 Error 从 nil 变为 context.Canceled 类错误（0.x breaking，消费方按 `Error: nil = 成功` 判定的口径收紧）
+- fix(async): 取消类错误豁免判据改测调用方 ctx——兄弟失败砍掉的任务不再记 Error:nil，报 context.Canceled 与「确实跑完」可区分；任务自身的超时错误不再被兄弟失败连带吞掉（#82）——此前四处判据测的是框架派生、会被框架在任务失败时 cancel 的 childCtx，退化成「此刻有没有兄弟失败过」，doc「绝不吞错」形态被吞；行为变更：RunAsyncWithResults 中被砍/未执行任务的 Error 从 nil 变为 context.Canceled 类错误（0.x breaking，消费方按 `Error: nil = 成功` 判定的口径收紧）。**新增公开哨兵 `ErrSkipped`**：未开始即被跳过的任务错误链携带该哨兵（`fmt.Errorf` 多 `%w` 与 ctx 取消错误双链，`errors.Is` 判定）——三态「成功 / 失败 / 未执行」显式可辨，`Error: nil` 回归「确实成功」单义；调用方 ctx 主动取消的豁免语义不变（#45，ErrSkipped 仅在调用方 ctx 健康时出现）
 
 关联问题单：oekit/workflow#82。
 
@@ -23,6 +25,10 @@
 - **BREAKING** fix(hook): After 改按逆注册序执行——AOP 洋葱配对恢复，span/事务类嵌套 hook 不再交叉关闭（#84）——此前 Before 正序、After 也正序，外层 hook 的收尾先于内层执行（TracingHook 先关 span 导致 AuditHook 事件丢失/挂错 parent，事务型 hook 的 COMMIT 先于内层收尾）；文档原明写「按注册序调用 After」属契约设计缺陷，本版改为逆序并同步 hook_manager.go/hook.go/doc.go 文案（0.x breaking：依赖 After 正序的消费方需反转收尾逻辑）
 
 关联问题单：oekit/workflow#84。
+
+现代语言特性：`fmt.Errorf` 多 `%w`（ErrSkipped 与 ctx 错误双链）、`errors.Join`（hook panic 聚合）；本轮回归测试的 #80/#82 用例定序全部改为屏障/事件序（started 信号 + gate channel），不再 sleep 猜时序。
+
+关联问题单：oekit/workflow#80、oekit/workflow#81、oekit/workflow#82、oekit/workflow#83、oekit/workflow#84。
 
 ## [v0.3.12] — 2026-11-10
 

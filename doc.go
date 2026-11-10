@@ -44,9 +44,11 @@
 //
 // 由此，兄弟任务失败触发的框架内部取消不豁免：被砍/未执行的任务在
 // AsyncFlow.RunAsyncWithResults 结果通道里报 context.Canceled 类错误，与
-// 「确实跑完」（Error: nil）可区分；被豁免（调用方取消）的任务结果记为
-// Error: nil（每个任务恰好一条结果，Index 连续）。「通道内全部 Error 为
-// nil」不代表流程未被取消，调用方需结合自身 context 判断。
+// 「确实跑完」（Error: nil）可区分；未开始即被跳过的任务错误链另携带
+// ErrSkipped 哨兵（errors.Is 判定，三态中的「未执行」显式可辨）。被豁免
+// （调用方取消）的任务结果记为 Error: nil（每个任务恰好一条结果，Index
+// 连续）。「通道内全部 Error 为 nil」不代表流程未被取消，调用方需结合
+// 自身 context 判断。
 //
 // # 并发契约
 //

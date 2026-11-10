@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/workflow@v0.3.11
+go get github.com/oekit/workflow@v0.4.0
 ```
 
 ## 这个仓库做什么
@@ -38,7 +38,9 @@ err := p.Run(ctx)
 ## Hook AOP
 
 `HookManager` 注册 Before/After/成功/失败钩子，自动递归传播到所有子流程——
-审计日志、链路打点、熔断注入都不用改业务步骤。
+审计日志、链路打点、熔断注入都不用改业务步骤。生命周期为洋葱模型：Before
+正序、After 逆序（LIFO）回放，且与 Before 严格配对（未执行 Before 的 Hook
+不收 After）。
 
 ## 边界
 
