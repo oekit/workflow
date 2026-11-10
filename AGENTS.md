@@ -1,6 +1,6 @@
 # AGENTS.md — oekit/workflow
 
-> 组合式流程编排——串行/并行/异步/条件分支 + Hook AOP（洋葱模型：Before 正序、After 逆序 LIFO 且与 Before 严格配对；快照契约覆盖嵌套各层；RunAsyncWithResults 结果三态 ErrSkipped）
+> 组合式流程编排——串行/并行/异步/条件分支 + Hook AOP
 > 当前版本：`v0.4.0` · module：`github.com/oekit/workflow` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
