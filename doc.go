@@ -34,16 +34,19 @@
 // # 任务错误与 context 取消的语义
 //
 // ParallelFlow/AsyncFlow 对错误链包含 context.Canceled/DeadlineExceeded 的
-// 任务错误采用统一豁免规则：
+// 任务错误采用统一豁免规则，判据是调用方传入的流程级 context（不是框架
+// 派生、会被框架在任务失败时 cancel 的内部 context，#82）：
 //
-//   - 流程级 context 确实被取消/超时 → 视为取消的副作用，不上报；
-//   - 流程级 context 健康 → 视为任务自身的失败（例如任务内部子操作超时
+//   - 调用方 context 确实被取消/超时 → 视为取消的副作用，不上报；
+//   - 调用方 context 健康 → 视为任务自身的失败（例如任务内部子操作超时
 //     返回 fmt.Errorf("db timeout: %w", context.DeadlineExceeded)），必须
 //     正常上报给调用方，绝不吞错。
 //
-// AsyncFlow.RunAsyncWithResults 的结果通道同样套用该规则：被豁免的任务
-// 结果记为 Error: nil（每个任务恰好一条结果，Index 连续）；「通道内全部
-// Error 为 nil」不代表流程未被取消，调用方需结合自身 context 判断。
+// 由此，兄弟任务失败触发的框架内部取消不豁免：被砍/未执行的任务在
+// AsyncFlow.RunAsyncWithResults 结果通道里报 context.Canceled 类错误，与
+// 「确实跑完」（Error: nil）可区分；被豁免（调用方取消）的任务结果记为
+// Error: nil（每个任务恰好一条结果，Index 连续）。「通道内全部 Error 为
+// nil」不代表流程未被取消，调用方需结合自身 context 判断。
 //
 // # 并发契约
 //

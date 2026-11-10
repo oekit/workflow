@@ -12,6 +12,10 @@
 
 关联问题单：oekit/workflow#81。
 
+- fix(async): 取消类错误豁免判据改测调用方 ctx——兄弟失败砍掉的任务不再记 Error:nil，报 context.Canceled 与「确实跑完」可区分；任务自身的超时错误不再被兄弟失败连带吞掉（#82）——此前四处判据测的是框架派生、会被框架在任务失败时 cancel 的 childCtx，退化成「此刻有没有兄弟失败过」，doc「绝不吞错」形态被吞；行为变更：RunAsyncWithResults 中被砍/未执行任务的 Error 从 nil 变为 context.Canceled 类错误（0.x breaking，消费方按 `Error: nil = 成功` 判定的口径收紧）
+
+关联问题单：oekit/workflow#82。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）
