@@ -8,6 +8,10 @@
 
 关联问题单：oekit/workflow#80。
 
+- fix(hook): After 与 Before 逐 hook 配对——Before 短路后未执行 Before 的 Hook 不再收到 After，且 After 循环逐 hook recover（#81）——此前 After 无条件遍历全部 hook，注册序 [鉴权(拒绝), 追踪] 时追踪 Hook 收到无配对的 After，计数/追踪型 Hook 计数漂移、span 关闭错位；任一 hook 的 After panic 还会截断后续 hook 的 After，现 panic 聚合为 error 与任务错误 join（#62 口径不变）
+
+关联问题单：oekit/workflow#81。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

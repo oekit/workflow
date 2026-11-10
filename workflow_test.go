@@ -537,6 +537,53 @@ func TestHookManager_MultipleHooks(t *testing.T) {
 	}
 }
 
+// rejectHook 的 Before 拒绝执行（返回 error），Before/After 各计数（#81 用）。
+type rejectHook struct {
+	beforeCount atomic.Int32
+	afterCount  atomic.Int32
+}
+
+func (h *rejectHook) Before(context.Context, Runnable) error {
+	h.beforeCount.Add(1)
+	return errors.New("auth denied")
+}
+
+func (h *rejectHook) After(context.Context, Runnable, error) {
+	h.afterCount.Add(1)
+}
+
+// TestHookManager_AfterOnlyForHooksWithExecutedBefore 是 #81 的回归钉：
+// Before 链短路后，Before 从未执行的 Hook 不得收到 After。此前 After
+// 无条件遍历全部 hook——注册序 [鉴权(拒绝), 追踪] 时追踪 Hook 收到无配对
+// 的 After，计数/追踪型 Hook 计数漂移、span 关闭错位。
+func TestHookManager_AfterOnlyForHooksWithExecutedBefore(t *testing.T) {
+	rej := &rejectHook{}
+	ok := &mockHook{}
+	hm := NewHookManager()
+	hm.Add(rej, ok)
+
+	pipe := NewPipe()
+	pipe.SetHookManager(hm)
+	pipe.Add(&mockRunnable{name: "step1"})
+
+	err := pipe.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected rejection error from Before short-circuit")
+	}
+	if got := rej.beforeCount.Load(); got != 1 {
+		t.Errorf("reject hook before=%d (want 1)", got)
+	}
+	if got := rej.afterCount.Load(); got != 1 {
+		t.Errorf("reject hook after=%d (want 1：拒绝者自身的 After 仍配对触发)", got)
+	}
+	if got := ok.beforeCount.Load(); got != 0 {
+		t.Errorf("ok hook before=%d (want 0：Before 未执行)", got)
+	}
+	if got := ok.afterCount.Load(); got != 0 {
+		t.Errorf("ok hook after=%d (want 0：Before 未执行的 hook 不得收到 After，#81)", got)
+	}
+}
+
 func TestHookManager_Len(t *testing.T) {
 	hm := NewHookManager()
 	if hm.Len() != 0 {

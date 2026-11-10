@@ -85,3 +85,30 @@ func TestSafeRun_TaskPanicThenAfterHookPanic_Joins(t *testing.T) {
 type panickyTask struct{}
 
 func (t *panickyTask) Run(context.Context) error { panic("task boom") }
+
+// TestSafeRun_AfterPanicDoesNotTruncateLaterHooks 是 #81 次生缺陷的回归钉：
+// After 循环逐 hook recover——任一 hook 的 After panic 不得截断后续 hook 的
+// After（配对进一步撕裂）；panic 聚合为错误、按 #62 口径与任务错误 join。
+func TestSafeRun_AfterPanicDoesNotTruncateLaterHooks(t *testing.T) {
+	later := &mockHook{}
+	hm := NewHookManager()
+	hm.Add(&panickyAfterHook{}, later)
+
+	taskErr := errors.New("payment declined")
+	err := safeRun(context.Background(), &errTask{err: taskErr}, hm)
+	if err == nil {
+		t.Fatal("expected joined error, got nil")
+	}
+	if !errors.Is(err, taskErr) {
+		t.Fatalf("task error must survive after-hook panic (join, #62): got %v", err)
+	}
+	if !strings.Contains(err.Error(), "after hook panic") {
+		t.Errorf("after hook panic must be reported, got %v", err)
+	}
+	if got := later.beforeCount.Load(); got != 1 {
+		t.Errorf("later hook before=%d (want 1)", got)
+	}
+	if got := later.afterCount.Load(); got != 1 {
+		t.Errorf("later hook after=%d (want 1：After panic 不得截断后续 hook 的 After，#81)", got)
+	}
+}
