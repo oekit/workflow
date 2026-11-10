@@ -70,6 +70,15 @@ func (s *SwitchFlow) SetHookManager(hm *HookManager) {
 // "Hook 或 Runnable 的 panic 会被捕获"契约对齐,2026-09-06 复审修复:
 // 原实现裸调 switchFunc,分支选择函数 panic 直接炸穿调用方）。
 func (s *SwitchFlow) Run(ctx context.Context) error {
+	s.mu.Lock()
+	hm := s.hookManager
+	s.mu.Unlock()
+	return s.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
+// 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
+func (s *SwitchFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 	// 检查 context
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("workflow: cancelled: %w", err)
@@ -88,9 +97,12 @@ func (s *SwitchFlow) Run(ctx context.Context) error {
 
 	// 查找分支（#46：加锁读取分支与 HookManager 的瞬时快照，
 	// 与并发 Case/SetHookManager 互不构成数据竞争）
-	runnable, hm, exists := s.branch(key)
+	runnable, ownHM, exists := s.branch(key)
 	if !exists {
 		return fmt.Errorf("workflow: no such branch: %s", key)
+	}
+	if hm == nil {
+		hm = ownHM
 	}
 
 	return safeRun(ctx, runnable, hm)

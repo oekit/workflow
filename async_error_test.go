@@ -254,13 +254,16 @@ func TestAsyncFlow_RunAsyncWithResults_PreCancelledCtxExempted(t *testing.T) {
 
 // TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError 与
 // TestParallelFlow_MixedRealAndCancelError 对齐（#45 一致性）：真实失败
-// 打断慢任务产生取消副作用——真实错误原样上报、取消副作用豁免为 nil，
-// 调用方不再被迫从结果通道里自行剔除取消噪音。
+// 打断慢任务产生取消副作用——真实错误原样上报。#82 修正豁免判据后，
+// 被砍任务不再豁免记 nil（nil 只表示「确实跑完」），而是报 context.Canceled
+// 类取消错误，「成功」与「未执行/被打断」可区分。
+// （本用例此前把「被砍记 nil」钉为既定语义——#82 认定该语义错误：通道 API
+// 无聚合面，nil=成功会把半成品/未执行任务静默记成功。）
 func TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError(t *testing.T) {
 	realErr := errors.New("db down: real failure")
 	a := NewAsync(4)
 	a.Add(
-		&mockRunnable{name: "slow", delay: 200 * time.Millisecond}, // 会被失败任务的 cancel 打断 → 取消类错误 → 豁免
+		&mockRunnable{name: "slow", delay: 200 * time.Millisecond}, // 会被失败任务的 cancel 打断 → 取消类错误
 		&errTask{err: realErr}, // 立即失败的真实错误
 	)
 
@@ -269,18 +272,70 @@ func TestAsyncFlow_RunAsyncWithResults_MixedRealAndCancelError(t *testing.T) {
 		t.Fatalf("expected exactly 2 results, got %d", len(got))
 	}
 	realCount := 0
+	cancelCount := 0
 	for idx, err := range got {
 		switch {
 		case errors.Is(err, realErr):
 			realCount++
+		case errors.Is(err, context.Canceled):
+			// 被砍任务：可区分的取消错误（#82）
+			cancelCount++
 		case err == nil:
-			// 被取消打断的慢任务：豁免为 nil
+			t.Errorf("task %d: 被砍任务记 Error: nil 与「确实跑完」不可区分（#82）", idx)
 		default:
-			t.Errorf("task %d: unexpected error %v (cancel side-effect must be exempted)", idx, err)
+			t.Errorf("task %d: unexpected error %v", idx, err)
 		}
 	}
 	if realCount != 1 {
 		t.Fatalf("expected real error reported exactly once, got %d", realCount)
+	}
+	if cancelCount != 1 {
+		t.Fatalf("expected killed task reported as context.Canceled exactly once, got %d (#82)", cancelCount)
+	}
+}
+
+// --- #82: 豁免判据测调用方 ctx，被砍任务不得记成功 ---
+
+// TestAsyncFlow_RunAsyncWithResults_SiblingFailureDoesNotSwallowTaskErrors 是
+// #82 的回归钉：豁免判据必须测调用方 ctx，而不是框架派生的 childCtx——
+// childCtx 会被框架自己在任一任务失败时 cancel（goSafeExecute 的
+// if err != nil { cancel() }），判据退化成「此刻有没有兄弟失败过」。
+// 两个断言：
+//
+//  1. 跑满并返回自身超时错误的任务（doc 点名的「db timeout: %w,
+//     context.DeadlineExceeded」形态）不得被兄弟失败连带豁免成 nil——
+//     无兄弟失败的对照组原样上报，实验组也必须上报（绝不吞错）；
+//  2. 被兄弟失败砍掉的任务不得记 Error: nil——「成功」与「未执行/被打断」
+//     必须可区分，报 context.Canceled 类取消错误。
+func TestAsyncFlow_RunAsyncWithResults_SiblingFailureDoesNotSwallowTaskErrors(t *testing.T) {
+	targetErr := fmt.Errorf("db timeout: %w", context.DeadlineExceeded)
+	targetStarted := make(chan struct{})
+	target := funcRunnable(func(ctx context.Context) error {
+		close(targetStarted)
+		time.Sleep(150 * time.Millisecond) // 跑满并返回自身超时错误（不看 ctx）
+		return targetErr
+	})
+	sibling := funcRunnable(func(ctx context.Context) error {
+		<-targetStarted // target 已在执行中才失败：砍掉的是在途任务
+		return errors.New("sibling failed")
+	})
+	killed := &gateRunnable{gate: make(chan struct{})} // 永不放行 → 被兄弟失败砍掉
+
+	a := NewAsync(4)
+	a.Add(sibling, target, killed)
+
+	got := collectResults(t, a.RunAsyncWithResults(context.Background()))
+	if len(got) != 3 {
+		t.Fatalf("expected exactly 3 results, got %d", len(got))
+	}
+	if got[0] == nil || !strings.Contains(got[0].Error(), "sibling failed") {
+		t.Errorf("task 0: real sibling error must be reported as-is, got %v", got[0])
+	}
+	if !errors.Is(got[1], context.DeadlineExceeded) || !strings.Contains(got[1].Error(), "db timeout") {
+		t.Errorf("task 1: task's own timeout error must survive sibling failure (绝不吞错), got %v (#82)", got[1])
+	}
+	if !errors.Is(got[2], context.Canceled) {
+		t.Errorf("task 2: killed task must report context.Canceled (not nil=成功), got %v (#82)", got[2])
 	}
 }
 
@@ -332,6 +387,41 @@ func TestAsyncFlow_Run_ParentCancelAndRealError_SurfacesRealError(t *testing.T) 
 		case <-time.After(5 * time.Second):
 			t.Fatalf("round %d: Run did not return within budget (drain after cancel hung)", i+1)
 		}
+	}
+}
+
+// TestAsyncFlow_Run_CancelReturnsBeforeNonCooperativeTaskFinishes 是 #80 的
+// 回归钉：契约「阻塞直到全部完成或 context 取消」——ctx 取消后 Run 只留
+// 有界收尾窗口（#61 的真实错误浮出用），不得无界等待不合作任务自然返回。
+// 修复前收尾 drain 是裸 <-future.done：任务 goroutine 不收尾 Run 就不返回，
+// 任务挂多久调用方的关停流程挂多久（契约中「context 取消」一侧失效）。
+func TestAsyncFlow_Run_CancelReturnsBeforeNonCooperativeTaskFinishes(t *testing.T) {
+	const taskDuration = 3 * time.Second
+	a := NewAsync(2)
+	a.Add(funcRunnable(func(ctx context.Context) error {
+		time.Sleep(taskDuration) // 不合作任务：不看 ctx
+		return nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	runErr := make(chan error, 1)
+	go func() { runErr <- a.Run(ctx) }()
+
+	time.Sleep(100 * time.Millisecond) // 任务已启动
+	cancel()
+
+	select {
+	case err := <-runErr:
+		elapsed := time.Since(start)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+		if elapsed >= taskDuration/2 {
+			t.Fatalf("Run returned after %v (cancel at 100ms)：ctx 取消后仍无界等待任务收尾（#80）", elapsed)
+		}
+	case <-time.After(taskDuration / 2):
+		t.Fatalf("Run did not return within %v after cancel：不合作任务让 Run 挂死（#80）", taskDuration/2)
 	}
 }
 

@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/oekit/concurrency/async"
 )
+
+// runCancelDrainGrace 是 Run 在 context 取消后等待任务收尾的宽限窗口（#80）。
+// 窗口内收尾的任务仍能把真实错误浮出（#61 的错误面契约）；超时即返回取消
+// 错误——不合作任务（不响应 ctx 的阻塞）不再让 Run 无界挂死。
+const runCancelDrainGrace = 500 * time.Millisecond
 
 // AsyncFlow 异步执行多个任务。
 // 返回 Future，不阻塞调用方。
@@ -83,7 +89,17 @@ func (a *AsyncFlow) snapshot() ([]Runnable, *HookManager) {
 // 任务错误（与 ParallelFlow 同场景语义对齐）；无真实错误时返回 ctx.Err()
 // （#35 取消不得假成功）。
 func (a *AsyncFlow) Run(ctx context.Context) error {
-	tasks, hm := a.snapshot()
+	_, hm := a.snapshot()
+	return a.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
+// 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
+func (a *AsyncFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	tasks, ownHM := a.snapshot()
+	if hm == nil {
+		hm = ownHM
+	}
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -95,9 +111,12 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 	future := newFuture(cancel)
 
 	// resultFn 捕获第一个任务错误，写入 future channel。
-	// 豁免规则（与 ParallelFlow 一致）：仅当流程级 context（childCtx）确实被
-	// 取消/超时时，错误链中的 context.Canceled/DeadlineExceeded 才视为取消的
-	// 副作用被豁免；流程 context 健康时，那是任务自身的超时/取消失败，必须上报。
+	// 豁免规则（与 ParallelFlow 一致）：仅当调用方的流程级 context
+	// （parentCtx）确实被取消/超时时，错误链中的 context.Canceled/
+	// DeadlineExceeded 才视为取消的副作用被豁免；流程 context 健康时，
+	// 那是任务自身的超时/取消失败，必须上报。判据不得用派生的 childCtx——
+	// 它会被框架自己在任务失败时 cancel，退化成「此刻有没有兄弟失败过」，
+	// 把任务自身的超时错误连带吞掉（#82，doc「绝不吞错」形态）。
 	var firstErr error
 	var errOnce sync.Once
 	done := goSafeExecute(childCtx, cancel, tasks, a.maxProcess, hm, func(_ int, err error) {
@@ -134,9 +153,20 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 		// 结果再看 ctx」：任务与流程共享取消源（childCtx 派生自同一
 		// parent），答取消的任务会很快收尾，此处等待的只是收尾窗口
 		// （无真实错误时仍返回 ctx.Err()，#35 取消不得假成功）。
-		<-future.done
-		if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
-			return cached
+		//
+		// #80：收尾等待必须有界——「会很快收尾」只是对合作任务成立的假设，
+		// Runnable 完全可以不看 ctx（time.Sleep、未接 ctx 的 RPC 等）。裸
+		// <-future.done 要等全部任务 goroutine 收尾，任务挂多久 Run 挂多久，
+		// 与「阻塞直到全部完成或 context 取消」契约中「context 取消」一侧
+		// 直接相悖。改为有界宽限：窗口内完成仍浮出真实错误（#61 不回退），
+		// 超时即按契约返回取消错误。
+		select {
+		case <-future.done:
+			if cached := future.cachedResult(); cached != nil && !isCancellationErr(cached) {
+				return cached
+			}
+		case <-time.After(runCancelDrainGrace):
+			return err
 		}
 	}
 	return err
@@ -152,18 +182,22 @@ func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 		return future
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	future := newFuture(cancel)
 
-	// 豁免规则与 Run 一致：仅当流程级 context 真被取消/超时时才豁免取消类
-	// 错误；流程 context 健康时任务自身的超时/取消失败必须上报。
+	// 豁免规则与 Run 一致（#82：判据测调用方 ctx，不是派生 ctx）：仅当
+	// 调用方流程级 context 真被取消/超时时才豁免取消类错误；流程 context
+	// 健康时任务自身的超时/取消失败必须上报。Future.Cancel() 显式取消同样
+	// 豁免——那是调用方主动放弃等待，语义是「取消即成功返回」（#35，
+	// TestAsyncFlow_Cancel 钉住）。
 	var firstErr error
 	var errOnce sync.Once
 	done := goSafeExecute(ctx, cancel, tasks, a.maxProcess, hm, func(_ int, err error) {
 		if err == nil {
 			return
 		}
-		if isCancellationErr(err) && ctx.Err() != nil {
+		if isCancellationErr(err) && (parentCtx.Err() != nil || future.canceled.Load()) {
 			return
 		}
 		errOnce.Do(func() { firstErr = err })
@@ -189,7 +223,10 @@ func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
 	return future
 }
 
-// AsyncResult 异步执行结果
+// AsyncResult 异步执行结果。
+// Error 为 nil 表示任务确实跑完且成功；被兄弟任务失败砍掉/未执行的任务
+// 报 context.Canceled 类错误（#82：「成功」与「被打断」可区分）；调用方
+// context 取消的副作用被豁免记 nil。
 type AsyncResult struct {
 	Index int
 	Error error
@@ -199,11 +236,14 @@ type AsyncResult struct {
 // 每个任务完成后会发送一条 AsyncResult 到通道（被豁免的任务同样有且仅有一条
 // 结果），全部任务结束后关闭通道。
 //
-// 错误豁免规则与 Run/RunAsync 一致（#45）：仅当流程级 context 确实被
-// 取消/超时时，错误链中的 context.Canceled/DeadlineExceeded 才视为取消的
-// 副作用被豁免——该任务的结果记为 Error: nil（不计为任务失败，每个任务
-// 恰好一条结果，Index 连续）；流程 context 健康时，任务自身的超时/取消
-// 失败必须原样上报。
+// 错误豁免规则与 Run/RunAsync 一致（#45），判据是调用方传入的流程级
+// context（#82：不是框架派生、会被框架在任务失败时 cancel 的内部
+// context）：仅当调用方 context 确实被取消/超时时，错误链中的
+// context.Canceled/DeadlineExceeded 才视为取消的副作用被豁免——该任务的
+// 结果记为 Error: nil（不计为任务失败，每个任务恰好一条结果，Index
+// 连续）；调用方 context 健康时，任务自身的超时/取消失败必须原样上报。
+// 兄弟任务失败触发的框架内部取消不豁免：被砍/未执行的任务报
+// context.Canceled 类错误，与「确实跑完」（Error: nil）可区分。
 // 因此「通道内全部 Error 为 nil」不代表流程未被取消，调用方需结合自身
 // context 判断整体执行状态。
 func (a *AsyncFlow) RunAsyncWithResults(ctx context.Context) <-chan AsyncResult {
@@ -214,14 +254,17 @@ func (a *AsyncFlow) RunAsyncWithResults(ctx context.Context) <-chan AsyncResult 
 		return ch
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	results := make(chan AsyncResult, len(tasks))
 
 	done := goSafeExecute(ctx, cancel, tasks, a.maxProcess, hm, func(idx int, err error) {
-		// 豁免判定与 Run/RunAsync 同款（#45）：流程 context 确实被取消/超时 ⇒
-		// 取消类错误是取消的副作用，不计为任务失败（结果记 nil）；
-		// 流程 context 健康 ⇒ 任务自身的超时/取消失败原样上报。
-		if err != nil && isCancellationErr(err) && ctx.Err() != nil {
+		// 豁免判定与 Run/RunAsync 同款（#45/#82）：调用方流程 context 确实被
+		// 取消/超时 ⇒ 取消类错误是取消的副作用，不计为任务失败（结果记
+		// nil）；调用方 context 健康 ⇒ 任务自身的超时/取消失败原样上报。
+		// 兄弟任务失败触发的框架内部 cancel 不豁免（判据测 parentCtx）：
+		// 被砍/未执行的任务报 context.Canceled 类错误，不得记 nil=成功。
+		if err != nil && isCancellationErr(err) && parentCtx.Err() != nil {
 			err = nil
 		}
 		results <- AsyncResult{Index: idx, Error: err}

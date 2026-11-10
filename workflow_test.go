@@ -537,6 +537,96 @@ func TestHookManager_MultipleHooks(t *testing.T) {
 	}
 }
 
+// rejectHook 的 Before 拒绝执行（返回 error），Before/After 各计数（#81 用）。
+type rejectHook struct {
+	beforeCount atomic.Int32
+	afterCount  atomic.Int32
+}
+
+func (h *rejectHook) Before(context.Context, Runnable) error {
+	h.beforeCount.Add(1)
+	return errors.New("auth denied")
+}
+
+func (h *rejectHook) After(context.Context, Runnable, error) {
+	h.afterCount.Add(1)
+}
+
+// TestHookManager_AfterOnlyForHooksWithExecutedBefore 是 #81 的回归钉：
+// Before 链短路后，Before 从未执行的 Hook 不得收到 After。此前 After
+// 无条件遍历全部 hook——注册序 [鉴权(拒绝), 追踪] 时追踪 Hook 收到无配对
+// 的 After，计数/追踪型 Hook 计数漂移、span 关闭错位。
+func TestHookManager_AfterOnlyForHooksWithExecutedBefore(t *testing.T) {
+	rej := &rejectHook{}
+	ok := &mockHook{}
+	hm := NewHookManager()
+	hm.Add(rej, ok)
+
+	pipe := NewPipe()
+	pipe.SetHookManager(hm)
+	pipe.Add(&mockRunnable{name: "step1"})
+
+	err := pipe.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected rejection error from Before short-circuit")
+	}
+	if got := rej.beforeCount.Load(); got != 1 {
+		t.Errorf("reject hook before=%d (want 1)", got)
+	}
+	if got := rej.afterCount.Load(); got != 1 {
+		t.Errorf("reject hook after=%d (want 1：拒绝者自身的 After 仍配对触发)", got)
+	}
+	if got := ok.beforeCount.Load(); got != 0 {
+		t.Errorf("ok hook before=%d (want 0：Before 未执行)", got)
+	}
+	if got := ok.afterCount.Load(); got != 0 {
+		t.Errorf("ok hook after=%d (want 0：Before 未执行的 hook 不得收到 After，#81)", got)
+	}
+}
+
+// orderHook 把 Before/After 的调用顺序记录到共享切片（#84 用；
+// 仅同步执行场景使用）。
+type orderHook struct {
+	name  string
+	order *[]string
+}
+
+func (h *orderHook) Before(context.Context, Runnable) error {
+	*h.order = append(*h.order, "before:"+h.name)
+	return nil
+}
+
+func (h *orderHook) After(context.Context, Runnable, error) {
+	*h.order = append(*h.order, "after:"+h.name)
+}
+
+// TestHookManager_AfterReverseOrder 是 #84 的回归钉：AOP/中间件洋葱模型
+// 要求 After 逆序（LIFO）——Before 正序开的 span/事务必须逆序关，否则
+// 外层 hook 的收尾先于内层执行（如 TracingHook 先关 span、AuditHook 的
+// 事件丢失或挂错 parent；事务型 hook 的 COMMIT 先于内层收尾）。
+// Before 保持注册序正序。
+func TestHookManager_AfterReverseOrder(t *testing.T) {
+	var order []string
+	hm := NewHookManager()
+	hm.Add(&orderHook{name: "A", order: &order},
+		&orderHook{name: "B", order: &order},
+		&orderHook{name: "C", order: &order})
+
+	err := safeRun(context.Background(), &okTask{}, hm)
+	if err != nil {
+		t.Fatalf("safeRun: %v", err)
+	}
+	want := []string{"before:A", "before:B", "before:C", "after:C", "after:B", "after:A"}
+	if len(order) != len(want) {
+		t.Fatalf("hook call order: got %v, want %v (#84：After 必须逆序)", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("hook call order: got %v, want %v (#84：After 必须逆序)", order, want)
+		}
+	}
+}
+
 func TestHookManager_Len(t *testing.T) {
 	hm := NewHookManager()
 	if hm.Len() != 0 {

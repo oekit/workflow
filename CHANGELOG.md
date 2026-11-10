@@ -2,6 +2,28 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [Unreleased]
+
+- fix(async): Run 的取消后收尾 drain 加上界——ctx 取消后最多再等 runCancelDrainGrace（500ms）的收尾窗口以浮出真实错误（#61 语义不回退），超时即按契约返回取消错误（#80）——此前收尾是裸 `<-future.done`，要等全部任务 goroutine 收尾，不合作任务（不响应 ctx 的阻塞）挂多久 Run 就挂多久，「阻塞直到全部完成或 context 取消」契约的「context 取消」一侧失效
+
+关联问题单：oekit/workflow#80。
+
+- fix(hook): After 与 Before 逐 hook 配对——Before 短路后未执行 Before 的 Hook 不再收到 After，且 After 循环逐 hook recover（#81）——此前 After 无条件遍历全部 hook，注册序 [鉴权(拒绝), 追踪] 时追踪 Hook 收到无配对的 After，计数/追踪型 Hook 计数漂移、span 关闭错位；任一 hook 的 After panic 还会截断后续 hook 的 After，现 panic 聚合为 error 与任务错误 join（#62 口径不变）
+
+关联问题单：oekit/workflow#81。
+
+- fix(async): 取消类错误豁免判据改测调用方 ctx——兄弟失败砍掉的任务不再记 Error:nil，报 context.Canceled 与「确实跑完」可区分；任务自身的超时错误不再被兄弟失败连带吞掉（#82）——此前四处判据测的是框架派生、会被框架在任务失败时 cancel 的 childCtx，退化成「此刻有没有兄弟失败过」，doc「绝不吞错」形态被吞；行为变更：RunAsyncWithResults 中被砍/未执行任务的 Error 从 nil 变为 context.Canceled 类错误（0.x breaking，消费方按 `Error: nil = 成功` 判定的口径收紧）
+
+关联问题单：oekit/workflow#82。
+
+- fix(pipe): Run 期间 SetHookManager 不再穿透嵌套快照契约——子流程本次执行以父流程快照的 manager 运行，同一 Run 不再混用两套 hook（#83）——此前 SetHookManager 立即递归写穿子流程的 manager 字段，而子流程稍后启动的执行读自己字段的快照，#46「本次 Run 继续使用快照中的旧 manager」的承诺只对直接层成立（AsyncFlow/SwitchFlow 同构，一并修复）
+
+关联问题单：oekit/workflow#83。
+
+- **BREAKING** fix(hook): After 改按逆注册序执行——AOP 洋葱配对恢复，span/事务类嵌套 hook 不再交叉关闭（#84）——此前 Before 正序、After 也正序，外层 hook 的收尾先于内层执行（TracingHook 先关 span 导致 AuditHook 事件丢失/挂错 parent，事务型 hook 的 COMMIT 先于内层收尾）；文档原明写「按注册序调用 After」属契约设计缺陷，本版改为逆序并同步 hook_manager.go/hook.go/doc.go 文案（0.x breaking：依赖 After 正序的消费方需反转收尾逻辑）
+
+关联问题单：oekit/workflow#84。
+
 ## [v0.3.12] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

@@ -71,15 +71,28 @@ func (p *ParallelFlow) SetHookManager(hm *HookManager) {
 // Run 并发执行所有任务。
 // 返回第一个非 nil error，或 context 取消错误。
 //
-// 错误豁免规则（与 AsyncFlow 一致）：仅当流程级 context 确实被取消/超时
-// 时，错误链中的 context.Canceled/DeadlineExceeded 才视为取消的副作用被
-// 豁免；流程 context 健康时，任务自身的超时/取消失败必须上报。
+// 错误豁免规则（与 AsyncFlow 一致）：判据是调用方传入的流程级 context
+// （#82：不是框架派生、会被框架在任务失败时 cancel 的内部 context）——
+// 仅当调用方 context 确实被取消/超时时，错误链中的
+// context.Canceled/DeadlineExceeded 才视为取消的副作用被豁免；调用方
+// context 健康时，任务自身的超时/取消失败必须上报。
 func (p *ParallelFlow) Run(ctx context.Context) error {
-	tasks, hm := p.snapshot()
+	_, hm := p.snapshot()
+	return p.runWithHooks(ctx, hm)
+}
+
+// runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
+// 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
+func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	tasks, ownHM := p.snapshot()
+	if hm == nil {
+		hm = ownHM
+	}
 	if len(tasks) == 0 {
 		return nil
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -89,7 +102,7 @@ func (p *ParallelFlow) Run(ctx context.Context) error {
 		if err == nil {
 			return
 		}
-		if isCancellationErr(err) && ctx.Err() != nil {
+		if isCancellationErr(err) && parentCtx.Err() != nil {
 			return
 		}
 		errs <- fmt.Errorf("workflow: parallel task %d failed: %w", idx, err)

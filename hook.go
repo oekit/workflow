@@ -10,6 +10,9 @@ type Hook interface {
 	Before(ctx context.Context, r Runnable) error
 
 	// After 在 Runnable 执行后调用（包括 Run panic 时通过 defer 触发）。
+	// 与 Before 配对（#81）：Before 未执行的 Hook 不会收到 After；Before
+	// 短路拒绝的 Hook 自身仍会收到一次 After。触发顺序为逆注册序（#84：
+	// AOP 洋葱配对，Before 正序开、After 逆序关）。
 	// err 为 nil 表示执行成功，非 nil 表示执行失败。
 	After(ctx context.Context, r Runnable, err error)
 }

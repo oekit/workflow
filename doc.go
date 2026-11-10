@@ -34,26 +34,35 @@
 // # 任务错误与 context 取消的语义
 //
 // ParallelFlow/AsyncFlow 对错误链包含 context.Canceled/DeadlineExceeded 的
-// 任务错误采用统一豁免规则：
+// 任务错误采用统一豁免规则，判据是调用方传入的流程级 context（不是框架
+// 派生、会被框架在任务失败时 cancel 的内部 context，#82）：
 //
-//   - 流程级 context 确实被取消/超时 → 视为取消的副作用，不上报；
-//   - 流程级 context 健康 → 视为任务自身的失败（例如任务内部子操作超时
+//   - 调用方 context 确实被取消/超时 → 视为取消的副作用，不上报；
+//   - 调用方 context 健康 → 视为任务自身的失败（例如任务内部子操作超时
 //     返回 fmt.Errorf("db timeout: %w", context.DeadlineExceeded)），必须
 //     正常上报给调用方，绝不吞错。
 //
-// AsyncFlow.RunAsyncWithResults 的结果通道同样套用该规则：被豁免的任务
-// 结果记为 Error: nil（每个任务恰好一条结果，Index 连续）；「通道内全部
-// Error 为 nil」不代表流程未被取消，调用方需结合自身 context 判断。
+// 由此，兄弟任务失败触发的框架内部取消不豁免：被砍/未执行的任务在
+// AsyncFlow.RunAsyncWithResults 结果通道里报 context.Canceled 类错误，与
+// 「确实跑完」（Error: nil）可区分；被豁免（调用方取消）的任务结果记为
+// Error: nil（每个任务恰好一条结果，Index 连续）。「通道内全部 Error 为
+// nil」不代表流程未被取消，调用方需结合自身 context 判断。
 //
 // # 并发契约
 //
 // 各 Flow 的 Add/Case、Hooks、SetHookManager 内部加锁，与 Run 并发调用
 // 不构成数据竞争。Run 以启动瞬间的成员快照执行：执行期间新增的任务/分支、
-// 替换的 HookManager 不影响本次 Run，下次 Run 生效。
+// 替换的 HookManager 不影响本次 Run，下次 Run 生效——含嵌套子流程的本次
+// 执行（子流程以父流程快照中的 manager 执行，SetHookManager 的递归传播
+// 不穿透在途执行，#83）。
 // 注意 HookManager 自身不在此列——Run 期间向 HookManager 注册 Hook 仍是
 // 数据竞争，Hook 必须在 Run 之前注册完毕（见 HookManager 并发契约）。
 //
 // # Hook AOP
+//
+// Before 按注册序触发、After 按逆注册序触发（洋葱配对，#84）：注册序
+// [LogHook, MetricsHook] 时 Before 先 Log 后 Metrics，After 先 Metrics
+// 后 Log——span/事务类嵌套 hook 正确交叉关闭。
 //
 //	hook := workflow.NewHookManager()
 //	hook.Add(&LogHook{}, &MetricsHook{})
