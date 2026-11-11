@@ -3,8 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
-	"sync"
 
 	"github.com/oekit/concurrency/async"
 )
@@ -17,22 +15,16 @@ import (
 // 不构成数据竞争。Run 以启动瞬间的任务快照执行，Run 期间新增的任务
 // 不影响本次执行（下次 Run 生效）。
 type ParallelFlow struct {
-	mu          sync.Mutex
-	runnables   []Runnable
-	maxProcess  int
-	hookManager *HookManager
+	flowBase
+	maxProcess int
 }
 
 // NewParallel 创建一个并行流程。
 // maxProcs 为最大并发数，<=0 表示不限制。
 func NewParallel(maxProcs int) *ParallelFlow {
-	if maxProcs <= 0 {
-		maxProcs = 0 // 不限制
-	}
-	return &ParallelFlow{
-		maxProcess:  maxProcs,
-		hookManager: NewHookManager(),
-	}
+	p := &ParallelFlow{maxProcess: max(maxProcs, 0)}
+	p.hookManager = NewHookManager()
+	return p
 }
 
 // Add 添加一个或多个并发任务。
@@ -40,32 +32,8 @@ func NewParallel(maxProcs int) *ParallelFlow {
 // 对称,2026-09-06 复审修复)。
 // 与 Run 并发调用是安全的：本次 Run 不感知并发新增的任务（快照语义）。
 func (p *ParallelFlow) Add(tasks ...Runnable) *ParallelFlow {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.runnables = append(p.runnables, tasks...)
-	for _, r := range tasks {
-		setHookManagerByRunnable(r, p.hookManager)
-	}
+	p.add(tasks...)
 	return p
-}
-
-// Hooks 获取 Hook 管理器。
-func (p *ParallelFlow) Hooks() *HookManager {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.hookManager
-}
-
-// SetHookManager 设置 HookManager（用于嵌套传播）。
-// 与 Run 并发调用是安全的：本次 Run 继续使用快照中的旧 manager。
-func (p *ParallelFlow) SetHookManager(hm *HookManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.hookManager = hm
-	// 递归传播到子流程
-	for _, r := range p.runnables {
-		setHookManagerByRunnable(r, hm)
-	}
 }
 
 // Run 并发执行所有任务。
@@ -128,13 +96,4 @@ func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error 
 		return err
 	}
 	return nil
-}
-
-// snapshot 返回任务集合与 HookManager 的快照（#46）。
-// Run 经快照执行：与并发 Add/SetHookManager 互不构成数据竞争，
-// 且本次执行不受快照之后变更的影响。
-func (p *ParallelFlow) snapshot() ([]Runnable, *HookManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Clone(p.runnables), p.hookManager
 }

@@ -57,8 +57,10 @@
 // 替换的 HookManager 不影响本次 Run，下次 Run 生效——含嵌套子流程的本次
 // 执行（子流程以父流程快照中的 manager 执行，SetHookManager 的递归传播
 // 不穿透在途执行，#83）。
-// 注意 HookManager 自身不在此列——Run 期间向 HookManager 注册 Hook 仍是
-// 数据竞争，Hook 必须在 Run 之前注册完毕（见 HookManager 并发契约）。
+// HookManager.Add 同样加锁（#99）：Run 期间向 HookManager 注册 Hook 不
+// 构成数据竞争，快照语义生效——每个任务/每次执行以各自开始瞬间的 hook
+// 集合为准，新注册的 hook 对后续快照可见；Hook 实现仍须并发安全且自担
+// 幂等。
 //
 // # Hook AOP
 //

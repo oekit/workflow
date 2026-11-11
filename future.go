@@ -60,7 +60,10 @@ func (f *Future) cachedResult() error {
 }
 
 // Wait 等待任务完成并返回结果。
-// 如果 ctx 在结果就绪前被取消，返回 ctx.Err()。
+// 如果 ctx 在结果就绪前被取消，返回 ctx.Err()；ctx 为 nil 时按簇内口径
+// 兜底为 context.Background()（#98，与 concurrency 的
+// retry/loop/syncx/breaker/Handle.WaitUpTo 对齐——直调 Future 的消费方
+// 没有上游 nil 检查，nil 接口方法调用会直接 panic）。
 // Wait 可重入（#43）：结果只产生一次并被缓存到字段（mutex 保护），首次
 // 消费后，后续调用——包括并发调用、以及首次 Wait 超时/取消返回 ctx.Err()
 // 后的重试——都直接拿到同一个缓存值，不会永久阻塞。
@@ -68,6 +71,9 @@ func (f *Future) cachedResult() error {
 // 结果双就绪时，非取消类的缓存错误优先于 ctx.Err()（#61）——不掷硬币，
 // 无真实错误时仍返回 ctx.Err()（#35 取消不得假成功）。
 func (f *Future) Wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// 非阻塞检查：结果可能已经就绪
 	select {
 	case <-f.done:

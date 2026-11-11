@@ -366,6 +366,44 @@ func TestFuture_Wait_Timeout(t *testing.T) {
 	}
 }
 
+// TestFuture_Wait_NilCtx 回归测试（#98）：Wait(nil) 此前在阻塞 select 里
+// 对 nil 接口调 Done() 直接 panic。按簇内口径兜底为 context.Background()
+// （concurrency 的 retry/loop/syncx/breaker/Handle.WaitUpTo 同款）——
+// Future 是导出结果句柄，直调消费方没有上游 nil 检查。
+func TestFuture_Wait_NilCtx(t *testing.T) {
+	t.Run("completed future returns cached result", func(t *testing.T) {
+		f := newFuture(nil)
+		f.complete(nil)
+		//nolint:staticcheck // #98 回归：Wait(nil) 的兜底正是被测行为
+		if err := f.Wait(nil); err != nil {
+			t.Fatalf("Wait(nil) on completed future: expected nil, got %v", err)
+		}
+	})
+
+	t.Run("error result", func(t *testing.T) {
+		expectedErr := errors.New("cached failure")
+		f := newFuture(nil)
+		f.complete(expectedErr)
+		//nolint:staticcheck // #98 回归：Wait(nil) 的兜底正是被测行为
+		if err := f.Wait(nil); !errors.Is(err, expectedErr) {
+			t.Fatalf("Wait(nil): expected %v, got %v", expectedErr, err)
+		}
+	})
+
+	t.Run("pending future unblocks on completion", func(t *testing.T) {
+		expectedErr := errors.New("late failure")
+		f := newFuture(nil)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			f.complete(expectedErr)
+		}()
+		//nolint:staticcheck // #98 回归：Wait(nil) 的兜底正是被测行为
+		if err := f.Wait(nil); !errors.Is(err, expectedErr) {
+			t.Fatalf("Wait(nil) on pending future: expected %v, got %v", expectedErr, err)
+		}
+	})
+}
+
 // TestFuture_Wait_Reentrant 回归测试（#43）：Wait 曾是一次性消费（channel
 // 容量 1），首次调用取走结果后，第二次调用永久阻塞。修复后结果被缓存到
 // 字段，重复 Wait 返回同一个值。
