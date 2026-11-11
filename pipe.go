@@ -3,8 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
-	"sync"
 )
 
 // PipeFlow 顺序执行多个步骤。
@@ -15,16 +13,14 @@ import (
 // 不构成数据竞争。Run 以启动瞬间的步骤快照执行，Run 期间新增的步骤
 // 不影响本次执行（下次 Run 生效）。
 type PipeFlow struct {
-	mu          sync.Mutex
-	runnables   []Runnable
-	hookManager *HookManager
+	flowBase
 }
 
 // NewPipe 创建一个顺序流程。
 func NewPipe() *PipeFlow {
-	return &PipeFlow{
-		hookManager: NewHookManager(),
-	}
+	p := &PipeFlow{}
+	p.hookManager = NewHookManager()
+	return p
 }
 
 // Add 添加一个或多个步骤（按添加顺序执行）。
@@ -33,32 +29,8 @@ func NewPipe() *PipeFlow {
 // hook 均生效(2026-09-06 复审修复:原实现只在 SetHookManager 时传播)。
 // 与 Run 并发调用是安全的：本次 Run 不感知并发新增的步骤（快照语义）。
 func (p *PipeFlow) Add(steps ...Runnable) *PipeFlow {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.runnables = append(p.runnables, steps...)
-	for _, r := range steps {
-		setHookManagerByRunnable(r, p.hookManager)
-	}
+	p.add(steps...)
 	return p
-}
-
-// Hooks 获取 Hook 管理器。
-func (p *PipeFlow) Hooks() *HookManager {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.hookManager
-}
-
-// SetHookManager 设置 HookManager（用于嵌套传播）。
-// 与 Run 并发调用是安全的：本次 Run 继续使用快照中的旧 manager。
-func (p *PipeFlow) SetHookManager(hm *HookManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.hookManager = hm
-	// 递归传播到子流程
-	for _, r := range p.runnables {
-		setHookManagerByRunnable(r, hm)
-	}
 }
 
 // Run 顺序执行所有步骤。
@@ -91,13 +63,4 @@ func (p *PipeFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 		}
 	}
 	return nil
-}
-
-// snapshot 返回步骤集合与 HookManager 的快照（#46）。
-// Run 经快照执行：与并发 Add/SetHookManager 互不构成数据竞争，
-// 且本次执行不受快照之后变更的影响。
-func (p *PipeFlow) snapshot() ([]Runnable, *HookManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Clone(p.runnables), p.hookManager
 }

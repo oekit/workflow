@@ -72,3 +72,56 @@ func TestHook_NestedOnionSequence(t *testing.T) {
 		t.Errorf("nested onion sequence broken:\ngot  %v\nwant %v", got, want)
 	}
 }
+
+// TestHookManager_AddConcurrentWithReaders 回归测试（#99）：HookManager.Add
+// 曾是无锁 append，与读侧（beforeRun/afterRun 无锁遍历 m.hooks）构成数据
+// 竞争——AsyncFlow.Add 的「与执行方法并发安全」承诺让 a.Hooks().Add(h)
+// 在 Run 期间也显得合法。Add 加锁 + 读侧快照后，本测试在 -race 下必须干净。
+func TestHookManager_AddConcurrentWithReaders(t *testing.T) {
+	hm := NewHookManager()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				hm.Add(&mockHook{})
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				_ = hm.Before(context.Background(), &okTask{})
+				hm.After(context.Background(), &okTask{}, nil)
+				_ = hm.Len()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestAsyncFlow_HooksAddConcurrentWithRun 复现 issue #99 的原始场景：
+// a.Hooks().Add(h) 与 a.Run 并发——用户从 AsyncFlow.Add 的快照承诺自然
+// 推论出这一用法，此前 HookManager 无锁 append 是真数据竞争。
+func TestAsyncFlow_HooksAddConcurrentWithRun(t *testing.T) {
+	a := NewAsync(4)
+	a.Add(&okTask{})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			a.Hooks().Add(&mockHook{})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if err := a.Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	}
+	<-done
+}

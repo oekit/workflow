@@ -3,8 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
-	"sync"
 )
 
 // SwitchFunc 条件路由函数。
@@ -18,19 +16,19 @@ type SwitchFunc func(ctx context.Context) string
 // 不构成数据竞争。Run 在选定 key 后以加锁读取瞬间的分支表执行，Run
 // 期间新增的分支不影响本次执行（下次 Run 生效）。
 type SwitchFlow struct {
-	mu          sync.Mutex
-	runnables   map[string]Runnable
-	switchFunc  SwitchFunc
-	hookManager *HookManager
+	flowHooks
+	runnables  map[string]Runnable
+	switchFunc SwitchFunc
 }
 
 // NewSwitch 创建一个条件分支流程。
 func NewSwitch(switchFunc SwitchFunc) *SwitchFlow {
-	return &SwitchFlow{
-		runnables:   make(map[string]Runnable),
-		switchFunc:  switchFunc,
-		hookManager: NewHookManager(),
+	s := &SwitchFlow{
+		runnables:  make(map[string]Runnable),
+		switchFunc: switchFunc,
 	}
+	s.hookManager = NewHookManager()
+	return s
 }
 
 // Case 添加一个分支。
@@ -45,20 +43,13 @@ func (s *SwitchFlow) Case(key string, runnable Runnable) *SwitchFlow {
 	return s
 }
 
-// Hooks 获取 Hook 管理器。
-func (s *SwitchFlow) Hooks() *HookManager {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.hookManager
-}
-
 // SetHookManager 设置 HookManager（用于嵌套传播）。
 // 与 Run 并发调用是安全的：本次 Run 继续使用加锁读取到的旧 manager。
+// 递归传播到子流程（成员是 map，传播循环无法与切片型 Flow 共用，#94）。
 func (s *SwitchFlow) SetHookManager(hm *HookManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hookManager = hm
-	// 递归传播到子流程
 	for _, r := range s.runnables {
 		setHookManagerByRunnable(r, hm)
 	}
@@ -116,12 +107,13 @@ func (s *SwitchFlow) branch(key string) (runnable Runnable, hm *HookManager, exi
 	return runnable, s.hookManager, exists
 }
 
-// selectBranch 调 switchFunc 并捕获 panic。
+// selectBranch 调 switchFunc 并捕获 panic（#97：经 pkg errors.Recovered
+// 单源收编，panic 值是 error 时身份透传）。
 func (s *SwitchFlow) selectBranch(ctx context.Context) (key string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			key = ""
-			err = fmt.Errorf("workflow: switch func panic: %v\n%s", r, debug.Stack())
+			err = panicError("switch func panic", r)
 		}
 	}()
 	return s.switchFunc(ctx), nil
