@@ -2,6 +2,15 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.10.1] — 2026-11-11
+
+> ⚠️ **误贴 tag，按「接受为最新」处理**：v0.10.1 这个版本号系批量发版脚本串仓取号误贴（network 的版本号打进了本仓，与 matrix-tools#290 幽灵 tag v0.2.12 同源 bug），tag 钉在本仓 main HEAD（8aff3af）。protect-release-tags 禁删，版本线接受 v0.4.0 → v0.10.1，后续跟版从 v0.10.1 起。本段补记该 tag 实际包含的内容（v0.4.0 之后的文档同步轮）：
+
+- docs: 矩阵表同步——DESC 31 合 1（config/tarx/resumable 收编，pkg#329/#326/#361）（#90）
+- docs(agents): AGENTS.md 首行 DESC 同步矩阵真相源（#88）
+- build: 矩阵依赖地板对齐（v0.33.0）（#87）
+
+
 ## [v0.4.0] — 2026-11-11
 
 审计清扫轮（#80–#84）。定版 v0.4.0 而非 v0.3.13：#82 补充新增公开 API——结果三态哨兵 `ErrSkipped`（区分「未执行」，`errors.Is` 判定）；另有 #84 的 After 回放顺序契约变更（0.x minor 允许 breaking）。
