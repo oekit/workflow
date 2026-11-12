@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/oekit/concurrency/async"
 )
@@ -36,8 +37,14 @@ func (p *ParallelFlow) Add(tasks ...Runnable) *ParallelFlow {
 	return p
 }
 
-// Run 并发执行所有任务。
+// Run 并发执行所有任务，阻塞直到全部完成或 context 取消。
 // 返回第一个非 nil error，或 context 取消错误。
+//
+// 取消后的收尾等待有界（#106，与 AsyncFlow 的 #80 修法同口径）：调用方
+// context 取消/超时后，等待任务收尾最多再留 runCancelDrainGrace（500ms）
+// 的宽限窗口浮出真实错误，超时即按契约返回取消错误——不合作任务（不响应
+// ctx 的阻塞调用）不再让 Run 无界挂死。正常路径（context 健康的长任务）
+// 仍阻塞到全部任务完成，不受宽限窗口约束。
 //
 // 错误豁免规则（与 AsyncFlow 一致）：判据是调用方传入的流程级 context
 // （#82：不是框架派生、会被框架在任务失败时 cancel 的内部 context）——
@@ -65,6 +72,7 @@ func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error 
 	defer cancel()
 
 	errs := make(chan error, len(tasks))
+	firstErrCh := make(chan error, 1)
 
 	done := goSafeExecute(ctx, cancel, tasks, p.maxProcess, hm, func(idx int, err error) {
 		if err == nil {
@@ -76,15 +84,36 @@ func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error 
 		errs <- fmt.Errorf("workflow: parallel task %d failed: %w", idx, err)
 	})
 
+	// errs 的收口与首错聚合移到独立 goroutine（#106）：errs 容量 = 任务数，
+	// 发送永不阻塞（resultFn 完成先于 done 关闭），本 goroutine 至多存活到
+	// 任务全部收尾——不合作任务仍在跑时它随任务一起滞留，不额外泄漏。
+	// 此前的 `for err := range errs` 在 Run 的调用 goroutine 上裸等 errs 关闭
+	// （即裸等 done），ctx 取消后要等**全部**任务收尾，不合作任务挂多久
+	// Run 就挂多久——「context 取消」一侧契约失效，与 #80 定性的缺陷族同款。
 	async.GoSafe(func() {
-		<-done
+		<-done // 全部任务 goroutine 收尾：此后 errs 不再有新发送，可安全收口
 		close(errs)
+		var firstErr error
+		for err := range errs {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		firstErrCh <- firstErr
 	})
 
+	// 正常路径：阻塞到全部任务收尾（errs 关闭 ⇒ 首错聚合完成），不受
+	// 宽限窗口约束；调用方 context 取消后收尾等待有界（#106，与 AsyncFlow
+	// 的 #80 修法同款）——窗口内收尾仍浮出真实错误（#61 语义不回退），
+	// 超时即按契约返回取消错误。
 	var firstErr error
-	for err := range errs {
-		if err != nil && firstErr == nil {
-			firstErr = err
+	select {
+	case firstErr = <-firstErrCh:
+	case <-parentCtx.Done():
+		select {
+		case firstErr = <-firstErrCh:
+		case <-time.After(runCancelDrainGrace):
+			return ctx.Err()
 		}
 	}
 	if firstErr != nil {
