@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.1] — 2026-11-12
+
+- Go 1.26 现代化清扫；依赖地板对齐 concurrency v0.34.1。纯等价重构+地板追平，行为零变更。
+
 ## [v0.11.0] — 2026-11-12
 
 - 行为缺陷三连与样板收编：四类 Flow 的注册/快照/传播样板抽取 flowBase/flowHooks 公共基座，公开 API 形状不变（#94）；AsyncFlow 三入口的 #82 豁免判据与 #35 取消兜底收敛为 errAggregator 单源，Run 判据对齐文档承诺的调用方 context（#96）；panic→error 转换 5 处统一改走 pkg errors.Recovered 单源，panic 值是 error 时 errors.Is/As 身份透传、栈保留在文本与 Stack 字段（#97）；Future.Wait(nil ctx) 按簇内口径兜底 context.Background，不再 nil 接口 panic（#98）；HookManager.Add 加锁同步，Run 期间注册 Hook 不再是数据竞争，契约注释同步改写（#99）。Go 地板抬至 1.26.0；显式依赖 pkg v0.45.0，logx 抬至 v0.10.0。
