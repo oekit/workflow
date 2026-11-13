@@ -113,6 +113,7 @@ func (a *AsyncFlow) Run(ctx context.Context) error {
 // runWithHooks 以显式 HookManager 执行本次流程（#83，见 PipeFlow 同名
 // 方法注释）：嵌套执行用父流程快照的 manager，不受 SetHookManager 穿透。
 func (a *AsyncFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	ctx = orBackground(ctx)
 	tasks, ownHM := a.snapshot()
 	if hm == nil {
 		hm = ownHM
@@ -174,6 +175,7 @@ func (a *AsyncFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 // RunAsync 异步执行所有任务，返回 Future。
 // 调用方可以通过 Future.Wait() 等待完成，或 Future.Cancel() 取消任务。
 func (a *AsyncFlow) RunAsync(ctx context.Context) *Future {
+	ctx = orBackground(ctx)
 	tasks, hm := a.snapshot()
 	if len(tasks) == 0 {
 		future := newFuture(nil)
@@ -245,6 +247,7 @@ func skippedErr(idx int, ctx context.Context) error {
 // 因此「通道内全部 Error 为 nil」不代表流程未被取消，调用方需结合自身
 // context 判断整体执行状态。
 func (a *AsyncFlow) RunAsyncWithResults(ctx context.Context) <-chan AsyncResult {
+	ctx = orBackground(ctx)
 	tasks, hm := a.snapshot()
 	if len(tasks) == 0 {
 		ch := make(chan AsyncResult)

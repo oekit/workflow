@@ -404,6 +404,70 @@ func TestFuture_Wait_NilCtx(t *testing.T) {
 	})
 }
 
+// TestRunFamily_NilCtx 回归测试（#114）：Run 家族六个导出入口的 nil ctx
+// 此前两种死法——pipe/switch 走 ctx.Err() 对 nil 接口解引用，只报
+// "invalid memory address or nil pointer dereference"，不指向 ctx；parallel/
+// async 走 context.WithCancel(nil)，由 context 包报 "cannot create context
+// from nil parent"。与 #98 的 Future.Wait nil 兜底（orBackground）同口径：
+// Run(nil) 语义等价于 Run(context.Background())，六入口行为一致。
+//
+// 每个入口用「构造 + call(ctx)」两段重放：nil 与 Background 各跑一遍，
+// 结果必须一致（都是 nil），从而同时钉住「不 panic」与「不改变语义」。
+func TestRunFamily_NilCtx(t *testing.T) {
+	newPipe := func() *PipeFlow { return NewPipe().Add(&okTask{}) }
+	newSwitch := func() *SwitchFlow {
+		return NewSwitch(func(context.Context) string { return "go" }).Case("go", &okTask{})
+	}
+	newParallel := func() *ParallelFlow { return NewParallel(2).Add(&okTask{}) }
+	newAsync := func() *AsyncFlow { return NewAsync(2).Add(&okTask{}) }
+
+	cases := []struct {
+		name string
+		call func(ctx context.Context) error
+	}{
+		{"PipeFlow.Run", func(ctx context.Context) error {
+			return newPipe().Run(ctx)
+		}},
+		{"SwitchFlow.Run", func(ctx context.Context) error {
+			return newSwitch().Run(ctx)
+		}},
+		{"ParallelFlow.Run", func(ctx context.Context) error {
+			return newParallel().Run(ctx)
+		}},
+		{"AsyncFlow.Run", func(ctx context.Context) error {
+			return newAsync().Run(ctx)
+		}},
+		{"AsyncFlow.RunAsync", func(ctx context.Context) error {
+			// Wait 侧同样透传该 ctx：覆盖「Run 家族 + Wait」双 nil 组合
+			//（#114 修复点 + #98 既有兜底叠加）。
+			return newAsync().RunAsync(ctx).Wait(ctx)
+		}},
+		{"AsyncFlow.RunAsyncWithResults", func(ctx context.Context) error {
+			var first error
+			for r := range newAsync().RunAsyncWithResults(ctx) {
+				if r.Error != nil && first == nil {
+					first = r.Error
+				}
+			}
+			return first
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 对照组：同入口传 context.Background()，两者结果必须一致。
+			if err := tc.call(context.Background()); err != nil {
+				t.Fatalf("Background 对照组应成功, got %v", err)
+			}
+			// 传 nil 经由 func 字段（tc.call），staticcheck 的 SA1012 不穿透
+			// 函数值 ⇒ 不需要 nolint（#114 回归：nil ctx 的兜底正是被测行为）。
+			if err := tc.call(nil); err != nil {
+				t.Fatalf("nil ctx 兜底后应等价 Background, got %v", err)
+			}
+		})
+	}
+}
+
 // TestFuture_Wait_Reentrant 回归测试（#43）：Wait 曾是一次性消费（channel
 // 容量 1），首次调用取走结果后，第二次调用永久阻塞。修复后结果被缓存到
 // 字段，重复 Wait 返回同一个值。

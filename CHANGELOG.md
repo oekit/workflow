@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.2] — 2026-11-13
+
+- fix: Run 家族六个入口 nil ctx 统一兜底 orBackground——pipe/switch 无提示空指针与 parallel/async context 包报错两种死法归一（#114）。对齐 #98 Future.Wait 的簇内口径。
+
+关联问题单：workflow#114。
+
 ## [v0.11.1] — 2026-11-12
 
 - Go 1.26 现代化清扫；依赖地板对齐 concurrency v0.34.1。纯等价重构+地板追平，行为零变更。
