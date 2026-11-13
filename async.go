@@ -11,7 +11,9 @@ import (
 	"github.com/oekit/concurrency/async"
 )
 
-// runCancelDrainGrace 是 Run 在 context 取消后等待任务收尾的宽限窗口（#80）。
+// runCancelDrainGrace 是 Run 在 context 取消后等待任务收尾的宽限窗口
+// （#80 引入，AsyncFlow 用；#106 起与 ParallelFlow.Run 共用同一常量与
+// 语义——同仓两条流程对同一条「context 取消」契约给出同一收尾上界）。
 // 窗口内收尾的任务仍能把真实错误浮出（#61 的错误面契约）；超时即返回取消
 // 错误——不合作任务（不响应 ctx 的阻塞）不再让 Run 无界挂死。
 const runCancelDrainGrace = 500 * time.Millisecond
