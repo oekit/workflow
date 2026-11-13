@@ -17,6 +17,22 @@ func isCancellationErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// orBackground 把 nil ctx 兜底为 context.Background()（#114，与 future.go
+// 的 Future.Wait nil 兜底同口径，#98）：Run 家族是导出直调入口，消费方把
+// 可选 ctx 直接透传（零值 ctx、配置驱动的 ctx 工厂返回 nil、测试桩未初始化）
+// 时没有上游 nil 检查——pipe/switch 的 ctx.Err() 对 nil 接口解引用只报
+// "invalid memory address"，不指向根因；parallel/async 的
+// context.WithCancel(nil) 由 context 包报 "cannot create context from nil
+// parent"。同一包四个入口两种死法，统一兜底后 Run(nil) 语义等价于
+// Run(context.Background())，与簇内 concurrency 的 retry/loop/syncx/breaker、
+// Handle.WaitUpTo 全部兜底的既有约定一致。
+func orBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 // panicError 把 recover() 的返回值收编为 error（#97）：统一走 pkg
 // errors.Recovered 单源——panic 值本身是 error 时身份透传（errors.Is /
 // errors.As 穿透 *errors.PanicError 直达原始错误），goroutine 栈保留在

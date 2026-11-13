@@ -46,6 +46,7 @@ func (p *PipeFlow) Run(ctx context.Context) error {
 // SetHookManager 的递归传播无法穿透正在进行的执行。hm 为 nil 时退回自身
 // 快照（兼容外部直调）。
 func (p *PipeFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
+	ctx = orBackground(ctx)
 	steps, ownHM := p.snapshot()
 	if hm == nil {
 		hm = ownHM

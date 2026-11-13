@@ -71,9 +71,7 @@ func (f *Future) cachedResult() error {
 // 结果双就绪时，非取消类的缓存错误优先于 ctx.Err()（#61）——不掷硬币，
 // 无真实错误时仍返回 ctx.Err()（#35 取消不得假成功）。
 func (f *Future) Wait(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = orBackground(ctx)
 	// 非阻塞检查：结果可能已经就绪
 	select {
 	case <-f.done:
