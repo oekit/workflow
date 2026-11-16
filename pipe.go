@@ -2,7 +2,8 @@ package workflow
 
 import (
 	"context"
-	"fmt"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // PipeFlow 顺序执行多个步骤。
@@ -54,13 +55,13 @@ func (p *PipeFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 	for i, r := range steps {
 		// 检查 context 是否已取消
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("workflow: cancelled before step %d: %w", i, err)
+			return pkgerrors.Wrapf(err, "workflow: cancelled before step %d", i)
 		}
 
 		err := safeRun(ctx, r, hm)
 
 		if err != nil {
-			return fmt.Errorf("workflow: step %d failed: %w", i, err)
+			return pkgerrors.Wrapf(err, "workflow: step %d failed", i)
 		}
 	}
 	return nil
