@@ -2,10 +2,10 @@ package workflow
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/oekit/concurrency/async"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // ParallelFlow 并发执行多个任务。
@@ -82,7 +82,7 @@ func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error 
 		if isCancellationErr(err) && parentCtx.Err() != nil {
 			return
 		}
-		errs <- fmt.Errorf("workflow: parallel task %d failed: %w", idx, err)
+		errs <- pkgerrors.Wrapf(err, "workflow: parallel task %d failed", idx)
 	})
 
 	// errs 的收口与首错聚合移到独立 goroutine（#106）：errs 容量 = 任务数，
