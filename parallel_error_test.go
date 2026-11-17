@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,5 +101,105 @@ func TestParallelFlow_Run_CooperativeTasksUnboundedByGrace(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 1200*time.Millisecond {
 		t.Fatalf("Run returned in %v — healthy-context tasks must not be bounded by the drain grace (#106)", elapsed)
+	}
+}
+
+// --- #149: 豁免判据/首错聚合单源 errAggregator 的 ParallelFlow 回归钉 ---
+
+// TestParallelFlow_TaskErrorWrappedWithTaskIndex 钉住 #149 收敛后唯一保留的
+// 出口差异：ParallelFlow 的错误面仍经 pkgerrors.Wrapf 标注任务序号
+// （"workflow: parallel task N failed"），errors.Is 穿透包装链直达任务原始
+// 错误——errs channel 删除后包装差异不得丢失。
+func TestParallelFlow_TaskErrorWrappedWithTaskIndex(t *testing.T) {
+	realErr := errors.New("db constraint violated")
+	p := NewParallel(2)
+	p.Add(&errTask{err: realErr})
+
+	err := p.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected task error, got nil")
+	}
+	if !errors.Is(err, realErr) {
+		t.Fatalf("errors.Is must pierce the wrap chain, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "workflow: parallel task 0 failed") {
+		t.Errorf("task-index wrap prefix lost after #149 migration: %q", err.Error())
+	}
+}
+
+// TestParallelFlow_Run_ParentCancelAndRealError_SurfacesRealError 是 #149
+// 判据统一 + #61 语义对齐的回归钉（与 AsyncFlow 同名用例同形）：真实错误
+// 已入账（record → firstErr）、内部 cancel 已触发、gate 任务经取消收尾
+// （取消副作用走豁免）后，调用方父 ctx 也被取消——Run 必须确定性返回真实
+// 任务错误，不得被 context.Canceled 掩蔽（outcome 的 firstErr 优先级，
+// 不掷硬币）。
+func TestParallelFlow_Run_ParentCancelAndRealError_SurfacesRealError(t *testing.T) {
+	const rounds = 30
+	realErr := errors.New("payment gateway 503")
+	for i := 0; i < rounds; i++ {
+		ran := make(chan struct{}, 1)
+		gate := make(chan struct{})
+		p := NewParallel(2)
+		p.Add(
+			&failFastTask{ran: ran, err: realErr}, // A：快速真实失败 → firstErr → 流程 cancel
+			&gateRunnable{gate: gate},             // B：阻塞至取消收尾 → 豁免路径
+		)
+
+		parent, pcancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- p.Run(parent) }()
+
+		<-ran     // A 已失败：firstErr 已入账、流程 cancel 已触发，B 仍阻塞
+		pcancel() // 父 ctx 取消：B 解除阻塞走豁免，真实错误不得被掩蔽
+
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, realErr) {
+				t.Fatalf("round %d: real task error masked by ctx cancellation: got %v, want %v (#61/#149)", i+1, err, realErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: Run did not return within budget", i+1)
+		}
+	}
+}
+
+// TestParallelFlow_Run_CallerCancelSideEffectExemptedAndNoFakeSuccess 钉住
+// 判据统一的豁免面（#149，errAggregator.exempted 条件 1+2）：调用方取消
+// 在途后，任务自报的 context.Canceled 是取消的副作用——豁免（不得以
+// "parallel task N failed" 包装错误形态返回），但 Run 仍不得假成功，返回
+// context.Canceled（#35 兜底，errAggregator.outcome 单源）。收尾不走
+// select（与 ctx.Done 掷硬币），时序全由屏障控制。
+func TestParallelFlow_Run_CallerCancelSideEffectExemptedAndNoFakeSuccess(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := NewParallel(1)
+	p.Add(funcRunnable(func(ctx context.Context) error {
+		close(started)
+		<-release
+		if err := ctx.Err(); err != nil {
+			return err // 取消副作用：任务自报取消错误
+		}
+		return nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- p.Run(ctx) }()
+
+	<-started
+	cancel()       // 调用方取消：任务随后自报的 Canceled 属取消副作用
+	close(release) // 放行收尾：宽限窗口内完成
+
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled (#35 取消不得假成功), got %v", err)
+		}
+		if strings.Contains(err.Error(), "parallel task") {
+			t.Fatalf("取消副作用须豁免，不得以包装任务错误形态返回, got %q", err.Error())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within budget")
 	}
 }
