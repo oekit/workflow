@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.5] — 2026-11-23
+
+- build: 依赖地板对齐（矩阵地板波次）——新地板：github.com/oekit/concurrency v0.40.0 github.com/oekit/logx v0.12.1 github.com/oekit/pkg v0.60.0 。零行为变化；已发布产物的 go.mod 地板此前滞后于矩阵登记版本，本版把新地板焊进已发布产物。
+
 ## [v0.11.4] — 2026-11-18
 
 - ParallelFlow 错误聚合/豁免收敛 errAggregator 单源,判据统一防单侧漂移(#149);nil-ctx 兜底收敛 contextx.OrBackground
