@@ -2,7 +2,8 @@ package workflow
 
 import (
 	"context"
-	"fmt"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // SwitchFunc 条件路由函数。
@@ -73,12 +74,12 @@ func (s *SwitchFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 	ctx = orBackground(ctx)
 	// 检查 context
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("workflow: cancelled: %w", err)
+		return pkgerrors.Wrapf(err, "workflow: cancelled")
 	}
 
 	// 检查 SwitchFunc
 	if s.switchFunc == nil {
-		return fmt.Errorf("workflow: switch function not set")
+		return pkgerrors.New("workflow: switch function not set")
 	}
 
 	// 获取分支 key（panic 转 error）
@@ -91,7 +92,7 @@ func (s *SwitchFlow) runWithHooks(ctx context.Context, hm *HookManager) error {
 	// 与并发 Case/SetHookManager 互不构成数据竞争）
 	runnable, ownHM, exists := s.branch(key)
 	if !exists {
-		return fmt.Errorf("workflow: no such branch: %s", key)
+		return pkgerrors.Newf("workflow: no such branch: %s", key)
 	}
 	if hm == nil {
 		hm = ownHM

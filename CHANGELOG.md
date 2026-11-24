@@ -2,6 +2,20 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.5] — 2026-11-23
+
+- build: 依赖地板对齐（矩阵地板波次）——新地板：github.com/oekit/concurrency v0.40.0 github.com/oekit/logx v0.12.1 github.com/oekit/pkg v0.60.0 。零行为变化；已发布产物的 go.mod 地板此前滞后于矩阵登记版本，本版把新地板焊进已发布产物。
+
+## [v0.11.4] — 2026-11-18
+
+- ParallelFlow 错误聚合/豁免收敛 errAggregator 单源,判据统一防单侧漂移(#149);nil-ctx 兜底收敛 contextx.OrBackground
+
+关联问题单：workflow#149。
+
+## [v0.11.3] — 2026-11-16
+
+- refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至 pkg v0.52.0。文案逐字节同形（测试断言零修改），多 %w/%w 居中/哨兵前置形态按仓规保留
+
 ## [v0.11.2] — 2026-11-13
 
 - fix: Run 家族六个入口 nil ctx 统一兜底 orBackground——pipe/switch 无提示空指针与 parallel/async context 包报错两种死法归一（#114）。对齐 #98 Future.Wait 的簇内口径。

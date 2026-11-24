@@ -18,10 +18,11 @@ import (
 // 错误——不合作任务（不响应 ctx 的阻塞）不再让 Run 无界挂死。
 const runCancelDrainGrace = 500 * time.Millisecond
 
-// errAggregator 收敛 AsyncFlow 三个执行入口（Run/RunAsync/RunAsyncWithResults）
-// 此前三写的「#82 豁免判据 + 首错聚合 + #35 取消兜底」编排（#96）：豁免
-// 语义改动单点生效，各入口只保留结果出口差异（有界 drain / Future /
-// 逐条 channel）。
+// errAggregator 收敛 AsyncFlow 三个执行入口（Run/RunAsync/RunAsyncWithResults，
+// #96）与 ParallelFlow.runWithHooks（#149）此前各自手写的「#82 豁免判据 +
+// 首错聚合 + #35 取消兜底」编排：豁免语义改动单点生效，各入口只保留结果
+// 出口差异（有界 drain / Future / 逐条 channel / ParallelFlow 的任务序号
+// 包装）。
 type errAggregator struct {
 	// parentCtx 是调用方传入的流程级 context（#82：判据不得用框架派生、
 	// 会被框架在任务失败时 cancel 的内部 context——那会退化成「此刻有没有

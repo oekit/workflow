@@ -2,10 +2,9 @@ package workflow
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"github.com/oekit/concurrency/async"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // ParallelFlow 并发执行多个任务。
@@ -46,9 +45,9 @@ func (p *ParallelFlow) Add(tasks ...Runnable) *ParallelFlow {
 // ctx 的阻塞调用）不再让 Run 无界挂死。正常路径（context 健康的长任务）
 // 仍阻塞到全部任务完成，不受宽限窗口约束。
 //
-// 错误豁免规则（与 AsyncFlow 一致）：判据是调用方传入的流程级 context
-// （#82：不是框架派生、会被框架在任务失败时 cancel 的内部 context）——
-// 仅当调用方 context 确实被取消/超时时，错误链中的
+// 错误豁免规则（与 AsyncFlow 单源 errAggregator，#149）：判据是调用方
+// 传入的流程级 context（#82：不是框架派生、会被框架在任务失败时 cancel
+// 的内部 context）——仅当调用方 context 确实被取消/超时时，错误链中的
 // context.Canceled/DeadlineExceeded 才视为取消的副作用被豁免；调用方
 // context 健康时，任务自身的超时/取消失败必须上报。
 func (p *ParallelFlow) Run(ctx context.Context) error {
@@ -72,58 +71,38 @@ func (p *ParallelFlow) runWithHooks(ctx context.Context, hm *HookManager) error 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errs := make(chan error, len(tasks))
-	firstErrCh := make(chan error, 1)
+	// 豁免判据与首错聚合单源 errAggregator（#149，#96 的收敛推广到
+	// ParallelFlow）：此前本入口手写「2 条件豁免 + errs channel 首错聚合」，
+	// 与 errAggregator 的 3 条件口径分叉——改判据只会改一边。收敛后判据
+	// 改动单点生效。ParallelFlow 无 Future，canceled 恒 nil——Future 显式
+	// 取消豁免分支对本入口不可达，运行时豁免行为与手写版一致（回归钉）。
+	ag := &errAggregator{parentCtx: parentCtx}
 
+	// resultFn 出口差异仅剩包装（#149）：ParallelFlow 的错误面标注任务
+	// 序号。Wrapf 对 nil 恒返回 nil；豁免判定在 record 内经 errors.Is
+	// 穿透包装链，与旧版「先豁免后包装」的判定等价。
 	done := goSafeExecute(ctx, cancel, tasks, p.maxProcess, hm, func(idx int, err error) {
-		if err == nil {
-			return
-		}
-		if isCancellationErr(err) && parentCtx.Err() != nil {
-			return
-		}
-		errs <- fmt.Errorf("workflow: parallel task %d failed: %w", idx, err)
+		ag.record(idx, pkgerrors.Wrapf(err, "workflow: parallel task %d failed", idx))
 	})
 
-	// errs 的收口与首错聚合移到独立 goroutine（#106）：errs 容量 = 任务数，
-	// 发送永不阻塞（resultFn 完成先于 done 关闭），本 goroutine 至多存活到
-	// 任务全部收尾——不合作任务仍在跑时它随任务一起滞留，不额外泄漏。
-	// 此前的 `for err := range errs` 在 Run 的调用 goroutine 上裸等 errs 关闭
-	// （即裸等 done），ctx 取消后要等**全部**任务收尾，不合作任务挂多久
-	// Run 就挂多久——「context 取消」一侧契约失效，与 #80 定性的缺陷族同款。
-	async.GoSafe(func() {
-		<-done // 全部任务 goroutine 收尾：此后 errs 不再有新发送，可安全收口
-		close(errs)
-		var firstErr error
-		for err := range errs {
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		firstErrCh <- firstErr
-	})
-
-	// 正常路径：阻塞到全部任务收尾（errs 关闭 ⇒ 首错聚合完成），不受
-	// 宽限窗口约束；调用方 context 取消后收尾等待有界（#106，与 AsyncFlow
-	// 的 #80 修法同款）——窗口内收尾仍浮出真实错误（#61 语义不回退），
-	// 超时即按契约返回取消错误。
-	var firstErr error
+	// 正常路径：阻塞到全部任务收尾，不受宽限窗口约束；调用方 context 取消
+	// 后收尾等待有界（#106，与 AsyncFlow 的 #80 修法同款）——窗口内收尾
+	// 仍浮出真实错误（#61 语义不回退），超时即按契约返回取消错误。
+	// 首错已在 record 内同步入账（once.Do）：done 在 wg.Wait() 之后关闭，
+	// <-done 返回即聚合终局——旧版 errs channel + 收口 goroutine（#106
+	// 引入的独立聚合 goroutine）随 #149 一并删除，Run 调用 goroutine 直接
+	// 等待 done 并以宽限窗口兜底，不合作任务不再让 Run 无界挂死。
 	select {
-	case firstErr = <-firstErrCh:
+	case <-done:
 	case <-parentCtx.Done():
 		select {
-		case firstErr = <-firstErrCh:
+		case <-done:
 		case <-time.After(runCancelDrainGrace):
 			return ctx.Err()
 		}
 	}
-	if firstErr != nil {
-		return firstErr
-	}
-	// 无真实任务错误但流程被取消：返回 context 取消错误（契约不变，
-	// 取消副作用类错误已在上方被豁免，不能因此假成功）。
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return nil
+	// 首错聚合与 #35 取消兜底见 errAggregator（#149 单源）：无真实任务
+	// 错误但流程被取消时返回 context 取消错误——取消副作用类错误已被
+	// 豁免，不得因此假成功。
+	return ag.outcome(ctx)
 }
